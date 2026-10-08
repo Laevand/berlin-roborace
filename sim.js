@@ -15,40 +15,50 @@ const WHEELBASE = 9;       // cm
 const VMAX = 50;           // cm/s at motor 100
 const DEADBAND = 20;       // motor values below this do not move the wheel
 
-// "rally": the official mat (droidconHQ/CuteBotDriver images/race_booth_area.jpg) as straights and arcs:
-// ['S', cm] straight, ['T', radius cm, degrees] arc (+ = left, - = right). Starts on the bottom straight heading
-// east, then the right-hand loop, the long top strand west, the snake (three parallel strands joined by
-// U-turns, strand spacing 44 cm = 24 cm of black between the 20 cm lanes) and down the left side to the start.
-// Approximate (lane width 20 cm is measured, the rest is traced from the photo): re-measure on the real mat.
-const RALLY_PATH = [['S', 180], ['T', 52, 90], ['S', 74], ['T', 52, 90], ['S', 240], ['T', 22, 180], ['S', 90],
-  ['T', 22, -180], ['S', 70], ['T', 22, 90], ['S', 46], ['T', 22, 90], ['S', 40]];
-const RALLY_START = [-60, -112];
+// "rally": the official mat (droidconHQ/CuteBotDriver images/race_booth_area.jpg, and the photo of the floor).
+// Corners [x, y, fillet radius] in photo pixels, scaled by CM_PER_PX (the lane is ~35 px = 20 cm wide).
+// Start on the bottom straight heading east, right-hand loop, long top strand west, then the meander:
+// five vertical strands joined by four U-turns, ending on the bottom straight again.
+// Traced by eye from a perspective photo: lane width 20 cm is measured, the rest is approximate.
+const CM_PER_PX = 0.55;
+const RALLY_CORNERS = [[700, 505, 0], [990, 505, 80], [990, 222, 80], [190, 222, 40], [190, 505, 35], [260, 505, 35],
+  [260, 325, 35], [330, 325, 35], [330, 505, 35], [400, 505, 35], [400, 325, 35], [470, 325, 35], [470, 505, 35]];
 const RALLY_HALF = 10;     // cm, lane is 20 cm wide
 const MOTOR_TAU = 0.15;    // s, wheel speed lag (rally)
 const GRIP_AY = 300;       // cm/s², lateral acceleration limit (rally)
 
+// closed polyline through the corners, each rounded with its fillet radius, a point about every 4 cm
 function buildRally() {
-  const pts = [[...RALLY_START]];
-  let [x, y] = RALLY_START, th = 0;
-  for (const [kind, a, b] of RALLY_PATH) {
-    if (kind === 'S') {
-      for (let d = 2; d < a + 1e-9; d += 2) pts.push([x + Math.cos(th) * Math.min(d, a), y + Math.sin(th) * Math.min(d, a)]);
-      x += Math.cos(th) * a;
-      y += Math.sin(th) * a;
-    } else {
-      const sg = Math.sign(b), tot = Math.abs(b) * Math.PI / 180;
-      const cx = x - Math.sin(th) * a * sg, cy = y + Math.cos(th) * a * sg; // arc center
-      const n = Math.ceil((tot * a) / 2);
-      for (let k = 1; k <= n; k++) {
-        const t = th + (sg * tot * k) / n;
-        pts.push([cx + Math.sin(t) * a * sg, cy - Math.cos(t) * a * sg]);
-      }
-      th += sg * tot;
-      x = cx + Math.sin(th) * a * sg;
-      y = cy - Math.cos(th) * a * sg;
-    }
+  const V = RALLY_CORNERS.map(([x, y, r]) => [(x - 580) * CM_PER_PX, -(y - 370) * CM_PER_PX, r * CM_PER_PX]);
+  const pts = [];
+  const line = (a, b) => {
+    const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 4));
+    for (let k = 0; k < n; k++) pts.push([a[0] + ((b[0] - a[0]) * k) / n, a[1] + ((b[1] - a[1]) * k) / n]);
+  };
+  let cur = null; // end of the previous fillet (or the start vertex)
+  const n = V.length;
+  for (let i = 0; i < n; i++) {
+    const [vx, vy, r] = V[i], p = V[(i + n - 1) % n], q = V[(i + 1) % n];
+    if (!r) { cur = [vx, vy]; continue; }
+    const u1 = [p[0] - vx, p[1] - vy], u2 = [q[0] - vx, q[1] - vy];
+    const l1 = Math.hypot(...u1), l2 = Math.hypot(...u2);
+    u1[0] /= l1; u1[1] /= l1; u2[0] /= l2; u2[1] /= l2;
+    const th = Math.acos(u1[0] * u2[0] + u1[1] * u2[1]);      // angle between the two sides
+    const t = r / Math.tan(th / 2);                           // distance from corner to tangent points
+    const a = [vx + u1[0] * t, vy + u1[1] * t], b = [vx + u2[0] * t, vy + u2[1] * t];
+    const bis = [u1[0] + u2[0], u1[1] + u2[1]], bl = Math.hypot(...bis);
+    const d = r / Math.sin(th / 2);
+    const c = [vx + (bis[0] / bl) * d, vy + (bis[1] / bl) * d];
+    line(cur, a);
+    let a0 = Math.atan2(a[1] - c[1], a[0] - c[0]), a1 = Math.atan2(b[1] - c[1], b[0] - c[0]);
+    let da = a1 - a0;
+    while (da > Math.PI) da -= 2 * Math.PI;
+    while (da < -Math.PI) da += 2 * Math.PI;
+    const steps = Math.max(2, Math.ceil((Math.abs(da) * r) / 4));
+    for (let k = 0; k < steps; k++) pts.push([c[0] + r * Math.cos(a0 + (da * k) / steps), c[1] + r * Math.sin(a0 + (da * k) / steps)]);
+    cur = b;
   }
-  pts.pop(); // last point is the start again
+  line(cur, [V[0][0], V[0][1]]); // back to the start
   return pts;
 }
 const RALLY = buildRally();
