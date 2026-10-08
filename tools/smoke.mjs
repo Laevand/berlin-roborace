@@ -120,6 +120,27 @@ try {
   const lost = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r, gaveUp: !!window.rr.S.mem.gaveUp }));
   await page.click('#btnStop');
   check(lost.l === 0 && lost.r === 0 && lost.gaveUp, `lane keeper stops when it can't find the lane (${lost.l},${lost.r}, gave up ${lost.gaveUp})`);
+
+  // Explore & map: drives the lane, asks ?DIST itself, draws the map overlay, backs up from a close obstacle.
+  const pickScript = (file) => page.evaluate((f) => {
+    const sel = document.getElementById('apSelect');
+    sel.value = f;
+    sel.dispatchEvent(new Event('change'));
+    document.getElementById('apApply').click();
+  }, file);
+  await pickScript('explore.js');
+  await page.evaluate(() => window.rr.transport.reset());
+  await page.click('#btnGo');
+  await page.waitForTimeout(2500);
+  const ex = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r, dist: window.rr.S.tel.dist, cells: Object.keys(window.rr.S.mem.cells || {}).length, map: !!document.getElementById('rrMap') }));
+  check(ex.l > 0 && ex.r > 0 && ex.dist > 0 && ex.cells > 3 && ex.map, `explore drives, reads distance, maps (${ex.l},${ex.r}, dist ${ex.dist}, ${ex.cells} cells, overlay ${ex.map})`);
+  await page.evaluate(() => { window.__distHold = setInterval(() => { window.rr.S.tel.dist = 8; window.rr.S.tel.distAt = performance.now(); }, 5); });
+  await page.waitForTimeout(400);
+  const back = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r }));
+  await page.evaluate(() => clearInterval(window.__distHold));
+  await page.click('#btnStop');
+  check(back.l < 0 && back.r < 0, `explore backs up from an obstacle 8 cm ahead (${back.l},${back.r})`);
+  await pickScript('lane.js');
   // Rally track (standalone SimCar, so the app's control loop can't interfere): lane, motor lag, laps, link model.
   const { SimCar, LinkModel } = await import('../sim.js');
   const car = new SimCar(() => ({ track: 'rally' }));
