@@ -15,26 +15,44 @@ const WHEELBASE = 9;       // cm
 const VMAX = 50;           // cm/s at motor 100
 const DEADBAND = 20;       // motor values below this do not move the wheel
 
-// "rally": closed Catmull-Rom spline through these control points (cm). Placeholder shape until the real
-// mat is measured: bottom straight (start), right bend, top S-bend, left bend.
-const RALLY_PTS = [[-90, -60], [0, -60], [90, -60], [150, -35], [160, 15], [120, 60], [60, 70], [20, 42],
-  [-20, 42], [-60, 70], [-110, 65], [-155, 30], [-155, -25], [-125, -52]];
+// "rally": the official mat (droidconHQ/CuteBotDriver images/race_booth_area.jpg) as straights and arcs:
+// ['S', cm] straight, ['T', radius cm, degrees] arc (+ = left, - = right). Starts on the bottom straight heading
+// east, then the right-hand loop, the long top strand west, the snake (three parallel strands joined by
+// U-turns, strand spacing 44 cm = 24 cm of black between the 20 cm lanes) and down the left side to the start.
+// Approximate (lane width 20 cm is measured, the rest is traced from the photo): re-measure on the real mat.
+const RALLY_PATH = [['S', 180], ['T', 52, 90], ['S', 74], ['T', 52, 90], ['S', 240], ['T', 22, 180], ['S', 90],
+  ['T', 22, -180], ['S', 70], ['T', 22, 90], ['S', 46], ['T', 22, 90], ['S', 40]];
+const RALLY_START = [-60, -112];
 const RALLY_HALF = 10;     // cm, lane is 20 cm wide
 const MOTOR_TAU = 0.15;    // s, wheel speed lag (rally)
 const GRIP_AY = 300;       // cm/s², lateral acceleration limit (rally)
 
 function buildRally() {
-  const P = RALLY_PTS, n = P.length, K = 24, pts = [];
-  for (let i = 0; i < n; i++) {
-    const [p0, p1, p2, p3] = [P[(i + n - 1) % n], P[i], P[(i + 1) % n], P[(i + 2) % n]];
-    for (let k = 0; k < K; k++) {
-      const t = k / K, t2 = t * t, t3 = t2 * t;
-      pts.push([0, 1].map((d) => 0.5 * (2 * p1[d] + (p2[d] - p0[d]) * t + (2 * p0[d] - 5 * p1[d] + 4 * p2[d] - p3[d]) * t2 + (3 * p1[d] - p0[d] - 3 * p2[d] + p3[d]) * t3)));
+  const pts = [[...RALLY_START]];
+  let [x, y] = RALLY_START, th = 0;
+  for (const [kind, a, b] of RALLY_PATH) {
+    if (kind === 'S') {
+      for (let d = 2; d < a + 1e-9; d += 2) pts.push([x + Math.cos(th) * Math.min(d, a), y + Math.sin(th) * Math.min(d, a)]);
+      x += Math.cos(th) * a;
+      y += Math.sin(th) * a;
+    } else {
+      const sg = Math.sign(b), tot = Math.abs(b) * Math.PI / 180;
+      const cx = x - Math.sin(th) * a * sg, cy = y + Math.cos(th) * a * sg; // arc center
+      const n = Math.ceil((tot * a) / 2);
+      for (let k = 1; k <= n; k++) {
+        const t = th + (sg * tot * k) / n;
+        pts.push([cx + Math.sin(t) * a * sg, cy - Math.cos(t) * a * sg]);
+      }
+      th += sg * tot;
+      x = cx + Math.sin(th) * a * sg;
+      y = cy - Math.cos(th) * a * sg;
     }
   }
+  pts.pop(); // last point is the start again
   return pts;
 }
 const RALLY = buildRally();
+const RALLY_BOX = [0, 1].map((d) => [Math.min(...RALLY.map((q) => q[d])), Math.max(...RALLY.map((q) => q[d]))]);
 
 // Round-trip Bluetooth delay model. 'steady' = base + jitter. 'varying' = flips between fast and slow
 // (about 350 ms extra), like the iPhone link measured at the booth.
@@ -270,13 +288,15 @@ export class SimTransport extends SimCar {
     let worldW = STRAIGHT + 2 * RADIUS + 2 * LANE_HALF + 10;
     let worldH = 2 * RADIUS + 2 * LANE_HALF + 10;
     if (this.rally) {
-      worldW = 2 * Math.max(...RALLY.map((q) => Math.abs(q[0]))) + 2 * RALLY_HALF + 10;
-      worldH = 2 * Math.max(...RALLY.map((q) => Math.abs(q[1]))) + 2 * RALLY_HALF + 10;
+      worldW = RALLY_BOX[0][1] - RALLY_BOX[0][0] + 2 * RALLY_HALF + 10;
+      worldH = RALLY_BOX[1][1] - RALLY_BOX[1][0] + 2 * RALLY_HALF + 34; // room for the lap text on top
     }
     const k = Math.min(W / worldW, H / worldH);
-    g.setTransform(k, 0, 0, -k, W / 2, H / 2);
+    const mx = this.rally ? (RALLY_BOX[0][0] + RALLY_BOX[0][1]) / 2 : 0;
+    const my = this.rally ? (RALLY_BOX[1][0] + RALLY_BOX[1][1]) / 2 + 12 : 0;
+    g.setTransform(k, 0, 0, -k, W / 2 - mx * k, H / 2 + my * k);
     g.fillStyle = this.lane ? '#111' : '#f4f4f4';
-    g.fillRect(-worldW, -worldH, 2 * worldW, 2 * worldH);
+    g.fillRect(mx - worldW, my - worldH, 2 * worldW, 2 * worldH);
     g.strokeStyle = this.lane ? '#f4f4f4' : '#111';
     g.lineWidth = (this.rally ? RALLY_HALF : this.lane ? LANE_HALF : LINE_HALF) * 2;
     g.beginPath();
@@ -323,9 +343,9 @@ export class SimTransport extends SimCar {
     if (this.rally) {
       g.setTransform(1, 0, 0, 1, 0, 0);
       g.fillStyle = '#fff';
-      g.font = `${12 * dpr}px monospace`;
+      g.font = `${10 * dpr}px monospace`;
       const best = this.laps.length ? Math.min(...this.laps) : 0;
-      g.fillText(`t ${this.time.toFixed(1)} s  laps ${this.laps.length}  last ${(this.laps[this.laps.length - 1] || 0).toFixed(2)}  best ${best.toFixed(2)}  off ${this.offTime.toFixed(1)} s${this.linkModel.slow ? '  [slow link]' : ''}`, 6 * dpr, 16 * dpr);
+      g.fillText(`${this.time.toFixed(0)}s  laps ${this.laps.length}  last ${(this.laps[this.laps.length - 1] || 0).toFixed(1)}  best ${best.toFixed(1)}  off ${this.offTime.toFixed(1)}${this.linkModel.slow ? '  SLOW LINK' : ''}`, 6 * dpr, 12 * dpr);
     }
   }
 }
