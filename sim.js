@@ -61,7 +61,7 @@ function buildRally() {
   line(cur, [V[0][0], V[0][1]]); // back to the start
   return pts;
 }
-const RALLY = buildRally();
+export const RALLY = buildRally(); // also drawn by autopilot/explore.js
 const RALLY_BOX = [0, 1].map((d) => [Math.min(...RALLY.map((q) => q[d])), Math.max(...RALLY.map((q) => q[d]))]);
 
 // Round-trip Bluetooth delay model. 'steady' = base + jitter. 'varying' = flips between fast and slow

@@ -134,6 +134,18 @@ try {
   await page.waitForTimeout(2500);
   const ex = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r, dist: window.rr.S.tel.dist, cells: Object.keys(window.rr.S.mem.cells || {}).length, map: !!document.getElementById('rrMap') }));
   check(ex.l > 0 && ex.r > 0 && ex.dist > 0 && ex.cells > 3 && ex.map, `explore drives, reads distance, maps (${ex.l},${ex.r}, dist ${ex.dist}, ${ex.cells} cells, overlay ${ex.map})`);
+  // Touch the map where the car is and drag its heading (straight up = +90°).
+  const mb = await page.locator('#rrMap').boundingBox();
+  const want = await page.evaluate(([x, y]) => { const v = window.__rrMapView, d = devicePixelRatio; return [v.x0 + (x * d) / v.sc, v.y1 - (y * d) / v.sc]; }, [mb.width / 2, mb.height / 2]);
+  await page.mouse.move(mb.x + mb.width / 2, mb.y + mb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(mb.x + mb.width / 2, mb.y + mb.height / 2 - 40, { steps: 3 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const placed = await page.evaluate(() => ({ x: window.rr.S.mem.x, y: window.rr.S.mem.y, h: window.rr.S.mem.h, user: window.rr.S.mem.userPlaced, track: Array.isArray(window.__rrTrack), armed: window.rr.S.armed }));
+  check(placed.user && placed.track && placed.armed && Math.hypot(placed.x - want[0], placed.y - want[1]) < 15 && Math.abs(placed.h - Math.PI / 2) < 0.3,
+    `touching the map places the car there without stopping Auto (${placed.x.toFixed(0)},${placed.y.toFixed(0)} vs ${want.map(Math.round)}, heading ${((placed.h * 180) / Math.PI).toFixed(0)}°, track ${placed.track})`);
+  if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT });
   await page.evaluate(() => { window.__distHold = setInterval(() => { window.rr.S.tel.dist = 8; window.rr.S.tel.distAt = performance.now(); }, 5); });
   await page.waitForTimeout(400);
   const back = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r }));
