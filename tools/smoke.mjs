@@ -100,7 +100,19 @@ try {
   const lost = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r, gaveUp: !!window.rr.S.mem.gaveUp }));
   await page.click('#btnStop');
   check(lost.l === 0 && lost.r === 0 && lost.gaveUp, `lane keeper stops when it can't find the lane (${lost.l},${lost.r}, gave up ${lost.gaveUp})`);
-  await page.evaluate(() => Object.assign(window.rr.p, { simLatency: 0 }));
+  // Rally track (standalone SimCar, so the app's control loop can't interfere): lane, motor lag, laps, link model.
+  const { SimCar, LinkModel } = await import('../sim.js');
+  const car = new SimCar(() => ({ track: 'rally' }));
+  check(!car.black(...car.sensors()[0]) && !car.black(...car.sensors()[1]), 'rally track starts the car inside the lane');
+  car.l = car.r = 60;
+  car.step(0.05);
+  const vEarly = car.v;
+  for (let i = 0; i < 40; i++) car.step(0.05);
+  check(vEarly < car.v * 0.5 && car.v > 5, `rally motors lag (v ${vEarly.toFixed(1)} → ${car.v.toFixed(1)})`);
+  const lm = new LinkModel(() => 0.5);
+  const rtts = new Set();
+  for (let t = 0; t < 30000; t += 500) rtts.add(lm.rtt(t, 'varying', 70));
+  check(rtts.has(70) && rtts.has(420) && new LinkModel().rtt(0, 'steady', 70) === 70, 'varying link flips between fast and slow');
 
   await page.click('#tabSeg button[data-tab=pilot]');
   await page.fill('#apCode', 'return [ broken');

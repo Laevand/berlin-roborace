@@ -51,8 +51,9 @@ const PARAMS = [
   { g: 'Link', k: 'withResponse', label: 'Write with response (slower, for debugging)', type: 'bool', def: false },
   { g: 'Link', k: 'autoReconnect', label: 'Auto-reconnect after a drop (brownout)', type: 'bool', def: true },
 
-  { g: 'Demo', k: 'simTrack', label: 'Demo track', type: 'select', options: ['lane', 'line'], def: 'lane', help: 'lane = white lane on black like the rally mat. line = black line on white.' },
+  { g: 'Demo', k: 'simTrack', label: 'Demo track', type: 'select', options: ['lane', 'line', 'rally'], def: 'lane', help: 'lane = white lane on an oval. line = black line on white. rally = 20 cm lane with an S-bend, motor lag and a lap timer.' },
   { g: 'Demo', k: 'simLatency', label: 'Demo Bluetooth delay (ms round trip)', min: 0, max: 500, step: 10, def: 70 },
+  { g: 'Demo', k: 'simLink', label: 'Demo link', type: 'select', options: ['steady', 'varying'], def: 'steady', help: 'varying = the delay jumps by about 350 ms for a few seconds at random, like the iPhone link at the booth.' },
 
   { g: 'Lights', k: 'fx', label: 'Turn signals, brake light, underglow', type: 'bool', def: true },
   { g: 'Lights', k: 'headlight', label: 'Headlight brightness', min: 0, max: 255, step: 5, def: 80 },
@@ -827,7 +828,7 @@ async function startDemo() {
   const { SimTransport } = await import(`./sim.js?t=${T}`);
   const canvas = $('sim');
   canvas.classList.remove('hidden');
-  const sim = new SimTransport((text) => link.onText(text), canvas, () => ({ track: p.simTrack, latency: p.simLatency }));
+  const sim = new SimTransport((text) => link.onText(text), canvas, () => ({ track: p.simTrack, latency: p.simLatency, link: p.simLink }));
   transport = sim;
   link.t = sim;
   setState('connected');

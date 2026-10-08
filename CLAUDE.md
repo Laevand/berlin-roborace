@@ -26,6 +26,9 @@ Win the Next App Robot Rally ([CONTEST.md](https://github.com/droidconHQ/CuteBot
 - Wheelies: at speed ~79 from a standstill the car nearly tips backward. The acceleration limit (`ramp`) is now on by default at 50. Straight-test trim on `tupaz` was +3.
 - Do the organizers accept a web app in Bluefy as the entry? If not, the fallback is a native WKWebView shell with a CoreBluetooth bridge, built in the cloud and installed via TestFlight with the user's Apple signing assets.
 
+## Simulator
+`?demo` → Tune → Demo has track `rally` (20 cm lane, S-bend + loop, motor lag, grip limit, lap timer on the canvas) and link `varying` (delay jumps +350 ms at random). The shape and `VMAX` (50 cm/s) are placeholders: calibrate from booth measurements (lane width 20 cm is real). `node tools/simrun.mjs --secs=180 --latency=70,200 --link=steady,varying --apBase=40,50,60` runs `autopilot/lane.js` headless over a parameter grid (any `--apXxx=a,b` is a param).
+
 ## Working with the user
 They are at the booth with only a phone. Keep replies short. For each change, say exactly what to tap: "Pull from repo" for `autopilot/` changes (keeps the connection), or "⬆ New build" then Connect for app changes. Ask for Log tab or dashboard screenshots as data, and prefer adding a Tune slider over another push.
 
