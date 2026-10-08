@@ -2,17 +2,17 @@
 
 An iPhone controller for the [Next App Robot Rally](https://github.com/droidconHQ/CuteBotDriver/blob/main/CONTEST.md) Cutebot. It needs no laptop, no Xcode and no build step.
 
-It is a static web app using **Web Bluetooth**. Safari on iOS doesn't support Web Bluetooth, so you open the page in the free **Bluefy** browser from the App Store. Any push to the repo is live on your phone within about a minute.
+It is a static web app using **Web Bluetooth**. Safari on iOS doesn't support Web Bluetooth, so you open it in the free **Bluefy** browser.
 
-## One-time setup (all from the iPhone)
+**Live app:** https://laevand.github.io/berlin-roborace/ (GitHub Pages, serving `main`). Every push to `main` is live about a minute later.
 
-1. **Install "Bluefy – Web BLE Browser"** from the App Store. "WebBLE" also works as a backup.
-2. **Host the repo.** Pick one:
-   - **GitHub Pages.** It needs a public repo or a paid GitHub plan. First make the repo public: github.com → repo → Settings → General → Danger Zone → Change visibility. Then go to Settings → Pages → *Deploy from a branch*, choose `main` and `/ (root)`, and save. The URL is `https://laevand.github.io/berlin-roborace/`.
-   - **Netlify** (free, and the repo can stay private). Go to app.netlify.com → Add new site → Import from Git → GitHub and pick this repo and branch. Leave the build command empty, set the publish directory to `.`, and deploy.
-3. Open the URL **in Bluefy**, tap **Connect** and pick `BBC micro:bit [xxxxx]`. Put the robot's 5-letter ID in **Tune → Robot ID** so the picker only shows your car. This matters at a busy booth.
+## Setup on the iPhone
 
-You can try it without a robot first: open `…/?demo` in any browser to get a simulated car on a line track.
+1. Install **Bluefy – Web BLE Browser** from the App Store.
+2. Open the live app URL in Bluefy and bookmark it.
+3. Enter the robot's 5-letter ID in **Tune → Robot ID**, so the picker only shows your car at a busy booth. Then tap **Connect** and pick `BBC micro:bit [xxxxx]`.
+
+To try it without a robot, add `?demo` to the URL. That gives you a simulated car on a line track.
 
 ## The adjust loops, fastest first
 
@@ -20,8 +20,8 @@ You can try it without a robot first: open `…/?demo` in any browser to get a s
 | --- | --- | --- |
 | Tuning | **Tune** tab sliders: speed, deadband, trim, steering feel, autopilot speeds. Changes apply live while you drive and are saved on the phone. | 0 s |
 | Autopilot logic | **Pilot** tab: edit the JS in place and tap **Apply**. It hot-swaps without disconnecting. | ~10 s |
-| Agent-written autopilot | Ask Claude Code in the phone app to change `autopilot/*.js`. It pushes, then you tap **Pull from repo** in the Pilot tab. The connection stays up. | ~1 min |
-| Agent-written app change | Claude pushes and a **⬆ New build** button appears in the header. Tap it, then tap **Connect** again. | ~1–2 min |
+| Agent-written autopilot | Ask Claude Code in the phone app to change `autopilot/*.js`. It pushes to `main`, then you tap **Pull from repo** in the Pilot tab. The connection stays up. | ~1 min |
+| Agent-written app change | Claude pushes to `main` and a **⬆ New build** button appears in the header. Tap it, then tap **Connect** again. | ~1–2 min |
 
 ## Driving
 

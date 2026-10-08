@@ -1,6 +1,6 @@
 # Notes for agents working on this repo
 
-The user drives a Cutebot robot from an iPhone (the Bluefy browser, using Web Bluetooth) and has **no laptop**. Every push to the deployed branch is live on their phone within about a minute, so a broken push can cost them practice time at the track.
+The user drives a Cutebot robot from an iPhone (the Bluefy browser, using Web Bluetooth) and has **no laptop**. Every push to `main` is live on their phone within about a minute, so a broken push can cost them practice time at the track.
 
 ## Rules
 - **Run `node tools/smoke.mjs` before every push.** It must print no FAIL lines. Add a check when you add behavior.

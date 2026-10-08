@@ -1,6 +1,6 @@
 // Roborace Pit: Web Bluetooth controller for the Next App / droidcon Cutebot firmware (microbitapi.js).
 // Runs on iPhone inside the Bluefy browser (Safari has no Web Bluetooth). Plain ES module, no build step:
-// push to the deployed branch, wait for Pages, tap "New build" (or "Pull from repo" for autopilot scripts).
+// push to main, wait for GitHub Pages, tap "New build" (or "Pull from repo" for autopilot scripts).
 
 const T = window.BUILD_T || Date.now();
 const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
