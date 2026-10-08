@@ -36,6 +36,7 @@ const PARAMS = [
   { g: 'Autopilot', k: 'apHard', label: 'Inner wheel, line lost', min: -100, max: 100, step: 1, def: -35 },
   { g: 'Autopilot', k: 'apLostMs', label: 'Line lost → hard turn after (ms)', min: 0, max: 1000, step: 10, def: 150 },
   { g: 'Autopilot', k: 'apInvert', label: 'Invert sensors (follow a white line on a dark floor)', type: 'bool', def: false },
+  { g: 'Autopilot', k: 'apOverride', label: 'Touch pads to override Auto', type: 'bool', def: true },
   { g: 'Autopilot', k: 'apStopDist', label: 'Stop for obstacle closer than (cm, 0 = off)', min: 0, max: 50, step: 1, def: 0 },
   { g: 'Autopilot', k: 'apDepth', label: 'Line queries in flight', min: 1, max: 4, step: 1, def: 2, help: 'More = more sensor readings per second (BLE round trip is ~70 ms on iPhone), same delay per reading.' },
   { g: 'Autopilot', k: 'apDistEvery', label: 'Read distance every N line reads (0 = never)', min: 0, max: 50, step: 1, def: 0, help: '?DIST blocks the robot for up to ~30 ms, so keep this off unless you need it.' },
@@ -419,6 +420,8 @@ function target(t) {
     const base = Math.max(1, Math.abs(p.apBase));
     return trimmed(S.apOut.map((v) => toMotor(clamp((S.thr * v) / base, -1, 1))));
   }
+  // Auto: touching a pad (or the gamepad) takes over while held; letting go hands control back.
+  if (S.armed && p.apOverride && (padSteer.active || padThrottle.active || S.gp.active)) return manual();
   if (!S.armed || !fresh) return [0, 0];
   if (p.apStopDist > 0 && S.tel.dist > 0 && S.tel.dist < p.apStopDist && t - S.tel.distAt < 600) return [0, 0];
   return trimmed(S.apOut);

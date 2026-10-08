@@ -70,6 +70,14 @@ try {
   check(await page.evaluate(() => window.rr.S.lineSent.length <= window.rr.p.apDepth), 'line queries in flight stay within apDepth');
   check(maxOff < 12, `lane keeper stays in the lane (center max ${maxOff.toFixed(1)} cm off, lane half 12)`);
   check(travelled > 100, `autopilot makes progress (${travelled.toFixed(0)} cm in 12 s)`);
+  const pb = await page.locator('#padThrottle').boundingBox();
+  await page.mouse.move(pb.x + pb.width / 2, pb.y + pb.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(400);
+  check(await page.evaluate(() => window.rr.S.armed && window.rr.transport.l === 0 && window.rr.transport.r === 0), 'touching a pad overrides Auto (idle thumb = stopped)');
+  await page.mouse.up();
+  await page.waitForTimeout(800);
+  check(await page.evaluate(() => window.rr.S.armed && (window.rr.transport.l !== 0 || window.rr.transport.r !== 0)), 'releasing the pad hands control back to Auto');
   await page.click('#btnStop');
   await page.waitForTimeout(150);
   check(await page.evaluate(() => !window.rr.S.armed && window.rr.transport.l === 0), 'STOP disarms and stops');
