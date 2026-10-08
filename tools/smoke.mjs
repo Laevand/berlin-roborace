@@ -1,0 +1,152 @@
+// Smoke test: serves the repo, runs the app in headless Chromium against the demo simulator and a fake
+// Web Bluetooth micro:bit, and fails on JS errors or broken driving. Run before pushing: `node tools/smoke.mjs`
+// Needs Playwright (npm i -D playwright, or a global install).
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+let chromium;
+for (const base of [import.meta.url, '/opt/node-tools/node_modules/', path.join(process.env.HOME || '', 'node_modules/')]) {
+  try { ({ chromium } = createRequire(base)('playwright')); break; } catch { /* try next */ }
+}
+if (!chromium) { console.error('Playwright not found: npm i -D playwright'); process.exit(2); }
+
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
+const server = http.createServer((req, res) => {
+  const rel = decodeURIComponent(new URL(req.url, 'http://x').pathname).replace(/^\/+/, '') || 'index.html';
+  const file = path.join(root, rel);
+  if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end(); return; }
+  res.writeHead(200, { 'content-type': types[path.extname(file)] || 'application/octet-stream', 'last-modified': fs.statSync(file).mtime.toUTCString() });
+  res.end(req.method === 'HEAD' ? undefined : fs.readFileSync(file));
+});
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const BASE = `http://127.0.0.1:${server.address().port}/`;
+
+const failures = [];
+const check = (ok, msg) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${msg}`); if (!ok) failures.push(msg); };
+const errors = [];
+const browser = await chromium.launch(process.env.CHROMIUM ? { executablePath: process.env.CHROMIUM } : {});
+const ctx = await browser.newContext({ viewport: { width: 844, height: 390 }, hasTouch: true, isMobile: true });
+
+try {
+  // 1. Demo simulator: manual driving and autopilot
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(BASE + '?demo');
+  await page.waitForFunction(() => window.rr?.link.connected, null, { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  const pad = await page.locator('#padThrottle').boundingBox();
+  const x0 = await page.evaluate(() => window.rr.transport.x);
+  await page.mouse.move(pad.x + pad.width / 2, pad.y + pad.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(pad.x + pad.width / 2, pad.y + pad.height / 2 - 80, { steps: 4 });
+  await page.waitForTimeout(1000);
+  const held = await page.evaluate(() => window.rr.S.out);
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  const released = await page.evaluate(() => ({ out: window.rr.S.out, l: window.rr.transport.l, x: window.rr.transport.x }));
+  check(held[0] > 25 && held[1] > 25, `throttle drives both wheels forward (${held})`);
+  check(released.out[0] === 0 && released.l === 0, 'releasing the pad stops the motors');
+  check(released.x > x0 + 5, 'simulated car moved');
+
+  await page.evaluate(() => window.rr.transport.reset());
+  await page.click('#modeSeg button[data-mode=auto]');
+  await page.click('#btnGo');
+  let maxOff = 0;
+  let travelled = 0;
+  let last = null;
+  for (let i = 0; i < 24; i++) {
+    await page.waitForTimeout(500);
+    const st = await page.evaluate(() => { const t = window.rr.transport; return { off: t.constructor.offTrack(t.x, t.y), x: t.x, y: t.y }; });
+    maxOff = Math.max(maxOff, st.off);
+    if (last) travelled += Math.hypot(st.x - last.x, st.y - last.y);
+    last = st;
+  }
+  check(maxOff < 3, `autopilot stays on the line (max ${maxOff.toFixed(2)} cm off)`);
+  check(travelled > 100, `autopilot makes progress (${travelled.toFixed(0)} cm in 12 s)`);
+  await page.click('#btnStop');
+  await page.waitForTimeout(150);
+  check(await page.evaluate(() => !window.rr.S.armed && window.rr.transport.l === 0), 'STOP disarms and stops');
+
+  await page.click('#tabSeg button[data-tab=pilot]');
+  await page.fill('#apCode', 'return [ broken');
+  await page.click('#apApply');
+  check((await page.textContent('#apStatus')).startsWith('Syntax error'), 'script syntax errors are reported');
+  await page.close();
+
+  // 2. Fake Web Bluetooth micro:bit (20-byte indications, disconnect + reconnect)
+  const page2 = await ctx.newPage();
+  page2.on('pageerror', (e) => errors.push(e.message));
+  await page2.addInitScript(() => {
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const got = [];
+    window.__ble = { got, maxWrite: 0 };
+    const dev = new EventTarget();
+    dev.id = 'dev1';
+    dev.name = 'BBC micro:bit [tuzov]';
+    dev.buf = '';
+    const indicate = (s) => {
+      const b = enc.encode(s);
+      for (let i = 0; i < b.length; i += 20) {
+        const chunk = b.slice(i, i + 20);
+        setTimeout(() => { const ev = new Event('characteristicvaluechanged'); Object.defineProperty(ev, 'target', { value: { value: new DataView(chunk.buffer) } }); txc.dispatchEvent(ev); }, 8 + i);
+      }
+    };
+    const replies = { '?LINE': 'LINE:2', '?ACCEL': 'ACCEL:-1023,-1012,-1004', '?DIST': 'DIST:42', PING: 'PONG', '?LIGHT': 'LIGHT:140', '?TEMP': 'TEMP:23' };
+    const txc = new EventTarget();
+    txc.startNotifications = async () => txc;
+    const rxc = {
+      properties: { write: true, writeWithoutResponse: true },
+      busy: false,
+      async writeValueWithoutResponse(buf) {
+        if (!dev.gatt.connected) throw new Error('GATT Server is disconnected');
+        if (this.busy) throw new Error('GATT operation already in progress');
+        this.busy = true; await new Promise((r) => setTimeout(r, 3)); this.busy = false;
+        window.__ble.maxWrite = Math.max(window.__ble.maxWrite, buf.byteLength);
+        dev.buf += dec.decode(buf);
+        let i;
+        while ((i = dev.buf.indexOf('#')) >= 0) { const c = dev.buf.slice(0, i); dev.buf = dev.buf.slice(i + 1); got.push(c); if (replies[c]) indicate(replies[c] + '#\n'); }
+      },
+    };
+    dev.gatt = {
+      connected: false,
+      async connect() { await new Promise((r) => setTimeout(r, 20)); this.connected = true; return this; },
+      disconnect() { this.connected = false; dev.dispatchEvent(new Event('gattserverdisconnected')); },
+      async getPrimaryService() { return { getCharacteristic: async (u) => (u.startsWith('6e400003') ? rxc : txc) }; },
+    };
+    window.__ble.dev = dev;
+    navigator.bluetooth = { requestDevice: async (opts) => { window.__ble.opts = opts; return dev; } };
+  });
+  await page2.goto(BASE);
+  await page2.waitForFunction(() => window.rr, null, { timeout: 5000 });
+  await page2.click('#tabSeg button[data-tab=tune]');
+  await page2.fill('#robotId', 'tuzov');
+  await page2.click('#btnConnect');
+  await page2.waitForFunction(() => window.rr.link.connected, null, { timeout: 5000 });
+  await page2.waitForTimeout(2500);
+  const st = await page2.evaluate(() => ({ opts: window.__ble.opts, tel: window.rr.S.tel, status: document.getElementById('status').textContent }));
+  check(st.opts.filters[0].name === 'BBC micro:bit [tuzov]', 'robot ID filters the device picker');
+  check(st.status === 'tuzov', 'status shows robot ID');
+  check(st.tel.line === 2 && st.tel.dist === 42 && st.tel.ping > 0, 'telemetry LINE/DIST/PING parsed');
+  check(JSON.stringify(st.tel.accel) === '[-1023,-1012,-1004]', 'reply split across 20-byte packets reassembled');
+  await page2.evaluate(() => window.rr.link.send('DISP,A VERY LONG TEAM NAME 123'));
+  await page2.waitForTimeout(200);
+  check(await page2.evaluate(() => window.__ble.got.includes('DISP,A VERY LONG TEAM NAME 123') && window.__ble.maxWrite <= 20), 'long commands chunked to 20 bytes');
+  await page2.evaluate(() => { const d = window.__ble.dev; d.gatt.connected = false; d.dispatchEvent(new Event('gattserverdisconnected')); });
+  await page2.waitForTimeout(1500);
+  check(await page2.evaluate(() => window.rr.link.connected), 'auto-reconnects after a drop');
+  await page2.evaluate(() => { window.__ble.got.length = 0; Object.defineProperty(document, 'hidden', { value: true, configurable: true }); document.dispatchEvent(new Event('visibilitychange')); });
+  await page2.waitForTimeout(100);
+  check(await page2.evaluate(() => window.__ble.got.includes('S')), 'sends S when the app goes to background');
+  await page2.close();
+} finally {
+  await browser.close();
+  server.close();
+}
+check(errors.length === 0, `no JS errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
+process.exit(failures.length ? 1 : 0);

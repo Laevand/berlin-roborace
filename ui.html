@@ -1,0 +1,111 @@
+<header id="bar">
+  <div class="conn" id="connBox"><span id="dot" class="dot"></span><span id="status">Offline</span></div>
+  <button id="btnConnect" class="btn primary">Connect</button>
+  <div class="seg" id="modeSeg">
+    <button data-mode="manual" class="on">Manual</button><button data-mode="assist">Assist</button><button data-mode="auto">Auto</button>
+  </div>
+  <div class="seg" id="tabSeg">
+    <button data-tab="drive" class="on">Drive</button><button data-tab="pilot">Pilot</button><button data-tab="tune">Tune</button><button data-tab="log">Log</button>
+  </div>
+  <button id="btnUpdate" class="btn warn hidden">⬆ New build</button>
+  <span id="build" class="muted small"></span>
+  <button id="btnGo" class="btn go hidden">GO</button>
+  <button id="btnStop" class="btn stop">STOP</button>
+</header>
+
+<main>
+  <section id="tab-drive" class="tab on">
+    <div class="pad" id="padSteer"><div class="knob"></div><span class="padlabel">STEER</span></div>
+
+    <div class="center">
+      <canvas id="sim" class="hidden"></canvas>
+      <div class="dash">
+        <div class="motors">
+          <div class="mbar"><i id="mL"></i><span id="mLv">0</span></div>
+          <div class="mbar"><i id="mR"></i><span id="mRv">0</span></div>
+        </div>
+        <div class="kv"><span>Line</span><b><i id="sL" class="sens"></i><i id="sR" class="sens"></i></b></div>
+        <div class="kv"><span>Dist</span><b id="vDist">–</b></div>
+        <div class="kv"><span>Ping</span><b id="vPing">–</b></div>
+        <div class="kv"><span>Line Hz</span><b id="vHz">–</b></div>
+        <div class="kv"><span>Accel</span><b id="vAccel">–</b></div>
+        <div class="kv"><span>Light·°C</span><b id="vEnv">–</b></div>
+      </div>
+      <div class="lap">
+        <b id="lapTime">0.00</b>
+        <button id="btnLap" class="btn">Start</button>
+        <button id="btnLapReset" class="btn">Reset</button>
+        <div id="lapList" class="muted small"></div>
+      </div>
+      <div class="quick">
+        <button class="btn" data-cmd="HORN">Horn</button>
+        <button class="btn" id="btnTilt">Tilt: off</button>
+        <button class="btn" id="btnFx">FX: on</button>
+      </div>
+    </div>
+
+    <div class="pad" id="padThrottle"><div class="knob"></div><span class="padlabel">THROTTLE</span></div>
+  </section>
+
+  <section id="tab-pilot" class="tab scroll">
+    <div class="row">
+      <select id="apSelect"></select>
+      <button id="apPull" class="btn">Pull from repo</button>
+      <button id="apApply" class="btn primary">Apply</button>
+      <span id="apStatus" class="muted small"></span>
+    </div>
+    <p class="muted small">
+      Function body: <code>(s, p, mem, ctx) → [left, right]</code>. Runs on every LINE reading.
+      <code>s.L</code>/<code>s.R</code> mean "this sensor is on the line" (after the Invert setting), <code>s.code</code> is the raw 0–3 value,
+      <code>s.dt</code> is ms since the last reading, <code>s.dist</code> is the last distance in cm, <code>p</code> holds the Tune values, and
+      <code>mem</code> persists until you press GO again. Apply hot-swaps the code and keeps the connection.
+    </p>
+    <textarea id="apCode" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+    <h3>Sensor history <span class="muted small">(newest on the right · top = left sensor)</span></h3>
+    <canvas id="lineHist" height="60"></canvas>
+    <div id="apParams" class="form"></div>
+  </section>
+
+  <section id="tab-tune" class="tab scroll">
+    <div class="form">
+      <fieldset>
+        <legend>Robot</legend>
+        <label>Robot ID <span class="muted small">(5 letters on the chassis; leave empty to list all)</span>
+          <input id="robotId" placeholder="tuzov" autocapitalize="off" autocorrect="off"></label>
+        <label>Team name <input id="teamName" placeholder="TEAM"></label>
+        <div class="row">
+          <button class="btn" id="btnTeam">Show team name</button>
+          <button class="btn" data-cmd="ICON,HAPPY">Happy</button>
+          <button class="btn" data-cmd="ICON,HEART">Heart</button>
+          <button class="btn" data-cmd="CLS">Clear</button>
+        </div>
+        <p class="muted small">DISP, ICON, HORN, BEEP and TONE block the robot's command loop while they run
+          (ICON for about 0.6 s, DISP for seconds). Use them only while the car is stopped.</p>
+      </fieldset>
+    </div>
+    <div id="tuneForm" class="form"></div>
+    <div class="row">
+      <button class="btn" id="btnExport">Copy settings</button>
+      <button class="btn" id="btnImport">Paste settings</button>
+      <button class="btn" id="btnDefaults">Reset to defaults</button>
+    </div>
+  </section>
+
+  <section id="tab-log" class="tab">
+    <div class="row">
+      <input id="rawCmd" placeholder="Raw command, e.g. MS,60,60 or ?LINE" autocapitalize="characters" autocorrect="off">
+      <button id="rawSend" class="btn primary">Send</button>
+    </div>
+    <div class="row">
+      <button class="btn" data-cmd="PING">PING</button>
+      <button class="btn" data-cmd="?LINE">?LINE</button>
+      <button class="btn" data-cmd="?DIST">?DIST</button>
+      <button class="btn" data-cmd="?ACCEL">?ACCEL</button>
+      <button class="btn" data-cmd="HL,255,255,255">Lights</button>
+      <button class="btn" data-cmd="HO">Lights off</button>
+      <label class="inline"><input type="checkbox" id="logTraffic"> log all traffic</label>
+      <button class="btn" id="logClear">Clear</button>
+    </div>
+    <pre id="log"></pre>
+  </section>
+</main>

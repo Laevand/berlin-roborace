@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0d12">
+<title>Roborace Pit</title>
+<style>html,body{margin:0;background:#0b0d12;color:#e8eaf0;font:15px -apple-system,system-ui,sans-serif}</style>
+<script>
+  // Stable shell. GitHub Pages caches files for 10 min, so everything that changes
+  // (ui.html, style.css, app.js, autopilot/*) is loaded with a fresh ?t= URL on every load.
+  // You should never need to edit this file.
+  (function () {
+    var t = Date.now();
+    window.BUILD_T = t;
+    var css = document.createElement('link');
+    css.rel = 'stylesheet';
+    css.href = 'style.css?t=' + t;
+    document.head.appendChild(css);
+    fetch('ui.html?t=' + t, { cache: 'no-store' })
+      .then(function (r) { return r.text(); })
+      .then(function (html) {
+        document.body.innerHTML = html;
+        var s = document.createElement('script');
+        s.type = 'module';
+        s.src = 'app.js?t=' + t;
+        document.body.appendChild(s);
+      })
+      .catch(function (e) { document.body.textContent = 'Failed to load UI: ' + e; });
+  })();
+</script>
+</head>
+<body>Loading…</body>
+</html>

@@ -1,0 +1,5 @@
+[
+  { "file": "line.js", "name": "Line follower (2 sensors)" },
+  { "file": "edge.js", "name": "Edge follower (keep one sensor on the line)" },
+  { "file": "probe.js", "name": "Sensor probe (motors off, logs readings)" }
+]
