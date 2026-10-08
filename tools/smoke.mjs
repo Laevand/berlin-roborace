@@ -82,6 +82,15 @@ try {
   await page.waitForTimeout(150);
   check(await page.evaluate(() => !window.rr.S.armed && window.rr.transport.l === 0), 'STOP disarms and stops');
 
+  // An idle gamepad that is merely connected must not hold the car in Auto.
+  await page.evaluate(() => { window.__gp = navigator.getGamepads; navigator.getGamepads = () => [{ connected: true, axes: [0, 0, 0, 0], buttons: [] }]; window.rr.transport.reset(); });
+  await page.click('#btnGo');
+  await page.waitForTimeout(1500);
+  const gpRun = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r }));
+  await page.click('#btnStop');
+  await page.evaluate(() => { navigator.getGamepads = window.__gp; });
+  check(gpRun.l > 0 && gpRun.r > 0, `Auto drives with an idle gamepad connected (${gpRun.l},${gpRun.r})`);
+
   await page.evaluate(() => window.rr.transport.reset());
   await page.click('#tabSeg button[data-tab=tune]');
   await page.click('#btnStraight');
