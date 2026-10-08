@@ -1,6 +1,4 @@
 [
-  { "file": "edge.js", "name": "Edge follower (rally mat: ride the lane's left edge)" },
-  { "file": "lane.js", "name": "Lane keeper (stay inside the lane, slower)" },
-  { "file": "line.js", "name": "Line follower (thin black line)" },
+  { "file": "lane.js", "name": "Lane keeper (stay inside the white lane)" },
   { "file": "probe.js", "name": "Sensor probe (motors off, logs readings)" }
 ]

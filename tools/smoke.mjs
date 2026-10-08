@@ -37,7 +37,7 @@ try {
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(BASE + '?demo');
   await page.waitForFunction(() => window.rr?.link.connected, null, { timeout: 5000 });
-  await page.evaluate(() => Object.assign(window.rr.p, { simTrack: 'line', simLatency: 0 }));
+  await page.evaluate(() => Object.assign(window.rr.p, { simTrack: 'lane', simLatency: 70 }));
   await page.waitForTimeout(500);
 
   const pad = await page.locator('#padThrottle').boundingBox();
@@ -68,7 +68,7 @@ try {
     last = st;
   }
   check(await page.evaluate(() => window.rr.S.lineSent.length <= window.rr.p.apDepth), 'line queries in flight stay within apDepth');
-  check(maxOff < 3, `autopilot stays on the line (max ${maxOff.toFixed(2)} cm off)`);
+  check(maxOff < 12, `lane keeper stays in the lane (center max ${maxOff.toFixed(1)} cm off, lane half 12)`);
   check(travelled > 100, `autopilot makes progress (${travelled.toFixed(0)} cm in 12 s)`);
   await page.click('#btnStop');
   await page.waitForTimeout(150);
@@ -84,37 +84,15 @@ try {
   check(mid.l === 60 && mid.r === 60, `straight test drives at the test speed (${mid.l},${mid.r})`);
   check(fin.l === 0 && fin.x > -25 && Math.abs(fin.y + 45) < 1, 'straight test goes straight, then stops');
 
-  // Edge follower on the rally-mat-like lane track (white lane, black outside), 70 ms Bluetooth delay.
-  await page.evaluate(() => Object.assign(window.rr.p, { simTrack: 'lane', simLatency: 70, apBase: 60, apTurn: 15, apLostMs: 150, apInvert: false }));
-  await page.click('#tabSeg button[data-tab=pilot]');
-  await page.selectOption('#apSelect', 'edge.js');
-  await page.click('#apApply');
-  await page.click('#tabSeg button[data-tab=drive]');
-  await page.evaluate(() => { const t = window.rr.transport; t.reset(); t.y = -33; }); // nose on the inner (left) edge
+  // Lost far from the lane: the lane keeper must stop on its own instead of circling.
   await page.click('#modeSeg button[data-mode=auto]');
-  await page.click('#btnGo');
-  let maxDev = 0;
-  let edgeTravel = 0;
-  let prevPos = null;
-  for (let i = 0; i < 24; i++) {
-    await page.waitForTimeout(500);
-    const st = await page.evaluate(() => { const t = window.rr.transport; return { off: t.constructor.offTrack(t.x, t.y), x: t.x, y: t.y }; });
-    maxDev = Math.max(maxDev, Math.abs(st.off - 12));
-    if (prevPos) edgeTravel += Math.hypot(st.x - prevPos.x, st.y - prevPos.y);
-    prevPos = st;
-  }
-  await page.click('#btnStop');
-  check(maxDev < 6, `edge follower rides the lane edge (max ${maxDev.toFixed(1)} cm off it)`);
-  check(edgeTravel > 150, `edge follower makes progress (${edgeTravel.toFixed(0)} cm in 12 s)`);
-
-  // Lost far from the lane: the edge follower must stop on its own instead of circling.
   await page.evaluate(() => { const t = window.rr.transport; t.reset(); t.x = 0; t.y = 0; });
   await page.click('#btnGo');
-  await page.waitForTimeout(3500);
-  const lost = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r, log: !!window.rr.S.mem.gaveUp }));
+  await page.waitForTimeout(4000);
+  const lost = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r, gaveUp: !!window.rr.S.mem.gaveUp }));
   await page.click('#btnStop');
-  check(lost.l === 0 && lost.r === 0 && lost.log, `edge follower stops when it can't find the edge (${lost.l},${lost.r}, gave up ${lost.log})`);
-  await page.evaluate(() => Object.assign(window.rr.p, { simTrack: 'line', simLatency: 0, apBase: 45 }));
+  check(lost.l === 0 && lost.r === 0 && lost.gaveUp, `lane keeper stops when it can't find the lane (${lost.l},${lost.r}, gave up ${lost.gaveUp})`);
+  await page.evaluate(() => Object.assign(window.rr.p, { simLatency: 0 }));
 
   await page.click('#tabSeg button[data-tab=pilot]');
   await page.fill('#apCode', 'return [ broken');
