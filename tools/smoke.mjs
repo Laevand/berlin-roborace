@@ -106,6 +106,14 @@ try {
   await page.click('#btnStop');
   check(maxDev < 6, `edge follower rides the lane edge (max ${maxDev.toFixed(1)} cm off it)`);
   check(edgeTravel > 150, `edge follower makes progress (${edgeTravel.toFixed(0)} cm in 12 s)`);
+
+  // Lost far from the lane: the edge follower must stop on its own instead of circling.
+  await page.evaluate(() => { const t = window.rr.transport; t.reset(); t.x = 0; t.y = 0; });
+  await page.click('#btnGo');
+  await page.waitForTimeout(3500);
+  const lost = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r, log: !!window.rr.S.mem.gaveUp }));
+  await page.click('#btnStop');
+  check(lost.l === 0 && lost.r === 0 && lost.log, `edge follower stops when it can't find the edge (${lost.l},${lost.r}, gave up ${lost.log})`);
   await page.evaluate(() => Object.assign(window.rr.p, { simTrack: 'line', simLatency: 0, apBase: 45 }));
 
   await page.click('#tabSeg button[data-tab=pilot]');

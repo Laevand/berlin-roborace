@@ -6,10 +6,23 @@
 //
 // Corrections start gentle and grow the longer the car stays off the edge, reaching
 // "Inner wheel, soft turn" after "Line lost → hard turn after (ms)".
+// If it can't get back onto the edge within GIVE_UP_MS it stops (no wild circles) and says why in the Log.
+// Press GO to try again.
+
+const GIVE_UP_MS = 2000;
 
 const base = p.apBase;
 const code = (s.L ? 2 : 0) + (s.R ? 1 : 0);
-if (code !== mem.code) { mem.code = code; mem.since = s.t; }
+if (mem.onEdgeAt === undefined) { mem.onEdgeAt = s.t; mem.counts = [0, 0, 0, 0]; }
+if (code !== mem.code) { mem.code = code; mem.since = s.t; mem.counts[code]++; }
+if (code === 2) mem.onEdgeAt = s.t;
+if (mem.gaveUp) return [0, 0];
+if (s.t - mem.onEdgeAt > GIVE_UP_MS) {
+  mem.gaveUp = true;
+  const what = ['both white (in the lane)', 'left white + right black (wrong way round?)', 'on edge', 'both black (off the lane)'][code];
+  ctx.log(`edge: lost for ${GIVE_UP_MS} ms, stopped. Now: ${what}. Seen: on edge x${mem.counts[2]}, in lane x${mem.counts[0]}, off lane x${mem.counts[3]}, reversed x${mem.counts[1]}`);
+  return [0, 0];
+}
 const k = Math.min(1, (s.t - mem.since) / Math.max(1, p.apLostMs));
 const inner = base - (base - p.apTurn) * (0.3 + 0.7 * k);
 
