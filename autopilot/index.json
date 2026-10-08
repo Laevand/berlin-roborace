@@ -1,4 +1,5 @@
 [
   { "file": "lane.js", "name": "Lane keeper (stay inside the white lane)" },
+  { "file": "map.js", "name": "Mapping run (drives like Lane keeper, logs a track map)" },
   { "file": "probe.js", "name": "Sensor probe (motors off, logs readings)" }
 ]
