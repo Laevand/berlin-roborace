@@ -8,7 +8,7 @@ It is a static web app using **Web Bluetooth**. Safari on iOS doesn't support We
 
 1. **Install "Bluefy – Web BLE Browser"** from the App Store. "WebBLE" also works as a backup.
 2. **Host the repo.** Pick one:
-   - **GitHub Pages.** It needs a public repo or a paid GitHub plan. First make the repo public: github.com → repo → Settings → General → Danger Zone → Change visibility. Then go to Settings → Pages → *Deploy from a branch*, choose this branch and `/ (root)`, and save. The URL is `https://laevand.github.io/berlin-roborace/`.
+   - **GitHub Pages.** It needs a public repo or a paid GitHub plan. First make the repo public: github.com → repo → Settings → General → Danger Zone → Change visibility. Then go to Settings → Pages → *Deploy from a branch*, choose `main` and `/ (root)`, and save. The URL is `https://laevand.github.io/berlin-roborace/`.
    - **Netlify** (free, and the repo can stay private). Go to app.netlify.com → Add new site → Import from Git → GitHub and pick this repo and branch. Leave the build command empty, set the publish directory to `.`, and deploy.
 3. Open the URL **in Bluefy**, tap **Connect** and pick `BBC micro:bit [xxxxx]`. Put the robot's 5-letter ID in **Tune → Robot ID** so the picker only shows your car. This matters at a busy booth.
 

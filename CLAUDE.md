@@ -19,4 +19,5 @@ The user drives a Cutebot robot from an iPhone (the Bluefy browser, using Web Bl
 - Don't flood the link. `Link` has three queues: urgent, then the latest motor command, then a FIFO. The control loop sends at most one motor update, one query and one light command per tick.
 
 ## Deploy
-The live site is GitHub Pages (or Netlify) serving the deployed branch. Ask the user which branch that is if it isn't the current one.
+GitHub Pages serves `main` at https://laevand.github.io/berlin-roborace/. The user has approved pushing straight to `main`.
+Run the smoke test first. A push goes live about a minute later. On the phone, the user taps "New build" or "Pull from repo".
