@@ -16,12 +16,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ---------------------------------------------------------------- settings
 
 const PARAMS = [
+  { g: 'Calibrate', k: 'trim', label: 'Trim (+ = left wheel faster)', min: -25, max: 25, step: 0.5, def: 0, help: 'Drifts right on a straight? Lower it. Drifts left? Raise it.' },
+  { g: 'Calibrate', k: 'testSpeed', label: 'Straight test speed', min: 25, max: 100, step: 1, def: 60 },
+  { g: 'Calibrate', k: 'testMs', label: 'Straight test duration (ms)', min: 300, max: 4000, step: 100, def: 1500 },
+
   { g: 'Drive', k: 'maxSpeed', label: 'Max speed', min: 25, max: 100, step: 1, def: 80 },
   { g: 'Drive', k: 'minSpeed', label: 'Start speed (deadband)', min: 0, max: 50, step: 1, def: 25, help: 'Smallest non-zero motor value. Below ~25 the wheels only hum.' },
   { g: 'Drive', k: 'steerGain', label: 'Steer strength', min: 0.1, max: 1, step: 0.05, def: 0.6, help: '0.5 = inner wheel stops at full lock, 1 = inner wheel reverses.' },
   { g: 'Drive', k: 'steerExpo', label: 'Steer expo', min: 0, max: 1, step: 0.05, def: 0.35, help: 'Higher = softer response near the center.' },
   { g: 'Drive', k: 'pivot', label: 'Spin speed when not moving', min: 0, max: 1, step: 0.05, def: 0.5 },
-  { g: 'Drive', k: 'trim', label: 'Trim (+ = left wheel faster)', min: -25, max: 25, step: 0.5, def: 0, help: 'Drifts right on a straight? Lower it. Drifts left? Raise it.' },
   { g: 'Drive', k: 'ramp', label: 'Acceleration limit (motor units per 100 ms, 0 = off)', min: 0, max: 200, step: 5, def: 0, help: 'If the robot reboots (sad then happy face) when you floor it, try 40–80. Braking is never limited.' },
   { g: 'Drive', k: 'padRadius', label: 'Joystick travel (px)', min: 30, max: 160, step: 5, def: 80 },
   { g: 'Drive', k: 'layout', label: 'Layout', type: 'select', options: ['dual', 'stick'], def: 'dual', help: 'dual = steer with left thumb, throttle with right. stick = one floating joystick.' },
@@ -101,6 +104,7 @@ class Link {
     this.rxBuf = '';
     this.onMessage = () => {};
     this.txCount = 0;
+    this.errCount = 0;
     this.rxCount = 0;
   }
   get connected() { return !!(this.t && this.t.connected); }
@@ -136,6 +140,7 @@ class Link {
         if (ui.traffic) log('tx', '→ ' + cmd);
       }
     } catch (e) {
+      this.errCount++;
       log('err', `write "${cmd}" failed: ${e.message || e}`);
       if (isMotor && !this.motor) this.motor = cmd; // retry the latest motor state
       setTimeout(() => this.pump(), 20);
@@ -255,11 +260,22 @@ let transport = null;
 
 // ---------------------------------------------------------------- telemetry in
 
+const waiters = {};
+// Resolves with the reply's value (e.g. "3" for LINE:3, "" for PONG), or null after ms.
+function expect(key, ms) {
+  return new Promise((res) => {
+    const timer = setTimeout(() => { if (waiters[key]?.res === res) delete waiters[key]; res(null); }, ms);
+    waiters[key] = { res, timer };
+  });
+}
+
 function onMessage(msg) {
   const i = msg.indexOf(':');
   const key = i < 0 ? msg : msg.slice(0, i);
   const val = i < 0 ? '' : msg.slice(i + 1);
   const t = now();
+  const w = waiters[key];
+  if (w) { delete waiters[key]; clearTimeout(w.timer); w.res(val); }
   switch (key) {
     case 'LINE': {
       const code = parseInt(val, 10) & 3;
@@ -371,6 +387,11 @@ function manual() { return trimmed(mix(S.thr, S.steer).map(toMotor)); }
 
 function target(t) {
   readInputs();
+  if (S.testDrive) {
+    // Touching either pad cancels the test.
+    if (t < S.testDrive && !padSteer.active && !padThrottle.active) return trimmed([p.testSpeed, p.testSpeed]);
+    S.testDrive = 0;
+  }
   if (S.mode === 'manual') return manual();
   const fresh = S.apOut && t - S.tel.lineAt < p.apTimeoutMs;
   if (S.mode === 'assist') {
@@ -408,6 +429,7 @@ function drive(t = now()) {
 
 function emergencyStop(why) {
   disarm(why);
+  S.testDrive = 0;
   S.out = [0, 0];
   S.lastMotor = 'S';
   S.lastMotorAt = now();
@@ -430,6 +452,67 @@ function disarm(why) {
   S.armed = false;
   renderModeUi();
   if (why) log('ap', 'Autopilot off: ' + why);
+}
+
+function setMode(m) {
+  emergencyStop();
+  S.mode = m;
+  S.apOut = null;
+  S.mem = {};
+  renderModeUi();
+}
+
+// ---------------------------------------------------------------- tests
+
+// Measures what the real BLE link can do: ping, and how fast the LINE sensor loop can run.
+async function linkTest() {
+  if (!link.connected) { log('err', 'Link test: connect first'); return; }
+  if (S.testing) return;
+  setMode('manual');
+  S.testing = true;
+  const errs0 = link.errCount;
+  log('ap', 'Link test running, motors off, about 5 s…');
+  try {
+    await sleep(300); // let replies to earlier telemetry queries drain
+    const pings = [];
+    for (let i = 0; i < 10; i++) {
+      const t0 = now();
+      link.send('PING');
+      if ((await expect('PONG', 1000)) !== null) pings.push(now() - t0);
+    }
+    const rtts = [];
+    let lost = 0;
+    const end = now() + 3000;
+    while (now() < end) {
+      const t0 = now();
+      link.send('?LINE');
+      if ((await expect('LINE', 500)) === null) lost++; else rtts.push(now() - t0);
+    }
+    const stat = (a) => (a.length ? `${Math.min(...a).toFixed(0)}/${(a.reduce((x, y) => x + y, 0) / a.length).toFixed(0)}/${Math.max(...a).toFixed(0)} ms` : 'none');
+    log('ap', `LINK TEST: ping min/avg/max ${stat(pings)} (${pings.length}/10 answered) | ` +
+      `LINE round trip ${stat(rtts)} = ${(rtts.length / 3).toFixed(0)} Hz, ${lost} lost | write errors ${link.errCount - errs0} | ` +
+      `robot ${transport?.name || '?'} | ${(navigator.userAgent.match(/iPhone OS [\d_]+/) || [''])[0]}`);
+  } finally {
+    S.testing = false;
+  }
+}
+
+// Drives straight at the test speed for a fixed time so trim can be tuned without fighting the joystick.
+function straightTest() {
+  if (!link.connected) { log('err', 'Straight test: connect first'); return; }
+  setMode('manual');
+  S.testDrive = now() + p.testMs;
+  log('ap', `Straight test: speed ${p.testSpeed} for ${p.testMs} ms, trim ${p.trim}`);
+}
+
+async function copyLog() {
+  const text = logBuf.map(([, m]) => m).join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    log('ap', `Copied ${logBuf.length} log lines to the clipboard`);
+  } catch {
+    log('err', 'Clipboard blocked: long-press the log text to select and copy it.');
+  }
 }
 
 // ---------------------------------------------------------------- lights
@@ -486,6 +569,7 @@ function tick() {
   pollGamepad();
   if (!link.connected) return;
   drive(t);
+  if (S.testing) return;
   if (S.mode === 'manual') {
     if (p.telemetry && ++S.telN % p.telEvery === 0 && link.backlog() === 0) query(ROTA[S.rot++ % ROTA.length], t);
   } else if (!S.lineOut || t - S.lineOutAt > 150) {
@@ -719,6 +803,7 @@ function buildForm(container, group) {
   for (const g of groups) {
     const fs = document.createElement('fieldset');
     fs.innerHTML = `<legend>${g}</legend>`;
+    fs.dataset.group = g;
     for (const x of PARAMS.filter((y) => y.g === g)) {
       const lab = document.createElement('label');
       const help = x.help ? `<span class="help">${x.help}</span>` : '';
@@ -915,6 +1000,12 @@ function init() {
   applyLayout();
 
   buildForm($('tuneForm'));
+  $('tuneForm').querySelector('fieldset[data-group="Calibrate"]').insertAdjacentHTML('beforeend',
+    '<div class="row"><button class="btn primary" id="btnStraight">Straight test</button>' +
+    '<span class="muted small">Drives straight, then stops. Adjust trim until the car tracks straight.</span></div>');
+  $('btnStraight').onclick = straightTest;
+  $('btnLinkTest').onclick = linkTest;
+  $('btnCopyLog').onclick = copyLog;
   buildForm($('apParams'), 'Autopilot');
   for (const x of PARAMS) syncInputs(x.k);
   document.addEventListener('input', (e) => { if (e.target.dataset?.k) onParamInput(e); });
@@ -937,13 +1028,7 @@ function init() {
   $('btnTilt').onclick = toggleTilt; // turning it on zeroes the current phone angle
 
   for (const b of document.querySelectorAll('#modeSeg button')) {
-    b.onclick = () => {
-      emergencyStop();
-      S.mode = b.dataset.mode;
-      S.apOut = null;
-      S.mem = {};
-      renderModeUi();
-    };
+    b.onclick = () => setMode(b.dataset.mode);
   }
   for (const b of document.querySelectorAll('#tabSeg button')) {
     b.onclick = () => {
@@ -1016,6 +1101,6 @@ function init() {
 }
 
 // Exposed for debugging from the Log tab / tests.
-window.rr = { p, S, link, log, arm, disarm, emergencyStop, startDemo, get transport() { return transport; } };
+window.rr = { p, S, link, log, arm, disarm, emergencyStop, startDemo, linkTest, straightTest, get transport() { return transport; } };
 
 init();

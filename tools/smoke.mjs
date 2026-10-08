@@ -72,6 +72,16 @@ try {
   await page.waitForTimeout(150);
   check(await page.evaluate(() => !window.rr.S.armed && window.rr.transport.l === 0), 'STOP disarms and stops');
 
+  await page.evaluate(() => window.rr.transport.reset());
+  await page.click('#tabSeg button[data-tab=tune]');
+  await page.click('#btnStraight');
+  await page.waitForTimeout(800);
+  const mid = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r }));
+  await page.waitForTimeout(1200);
+  const fin = await page.evaluate(() => ({ l: window.rr.transport.l, x: window.rr.transport.x, y: window.rr.transport.y }));
+  check(mid.l === 60 && mid.r === 60, `straight test drives at the test speed (${mid.l},${mid.r})`);
+  check(fin.l === 0 && fin.x > -25 && Math.abs(fin.y + 45) < 1, 'straight test goes straight, then stops');
+
   await page.click('#tabSeg button[data-tab=pilot]');
   await page.fill('#apCode', 'return [ broken');
   await page.click('#apApply');
@@ -137,6 +147,11 @@ try {
   await page2.evaluate(() => window.rr.link.send('DISP,A VERY LONG TEAM NAME 123'));
   await page2.waitForTimeout(200);
   check(await page2.evaluate(() => window.__ble.got.includes('DISP,A VERY LONG TEAM NAME 123') && window.__ble.maxWrite <= 20), 'long commands chunked to 20 bytes');
+  await page2.click('#tabSeg button[data-tab=log]');
+  await page2.click('#btnLinkTest');
+  await page2.waitForTimeout(5000);
+  const report = await page2.evaluate(() => [...document.querySelectorAll('#log span')].map((x) => x.textContent).find((t) => t.includes('LINK TEST')) || '');
+  check(/10\/10 answered/.test(report) && / \d+ Hz, 0 lost/.test(report), `link test reports ping and loop rate: ${report.replace(/^[\d.]+\s+/, '')}`);
   await page2.evaluate(() => { const d = window.__ble.dev; d.gatt.connected = false; d.dispatchEvent(new Event('gattserverdisconnected')); });
   await page2.waitForTimeout(1500);
   check(await page2.evaluate(() => window.rr.link.connected), 'auto-reconnects after a drop');
