@@ -82,6 +82,17 @@ try {
   await page.waitForTimeout(150);
   check(await page.evaluate(() => !window.rr.S.armed && window.rr.transport.l === 0), 'STOP disarms and stops');
 
+  // Real robot: PING waits behind ?LINE so ping reads ~700 ms; with Start speed 0 the old cap sent MS,10,10.
+  await page.evaluate(() => { Object.assign(window.rr.p, { minSpeed: 0 }); window.rr.transport.reset(); });
+  await page.click('#btnGo');
+  await page.waitForTimeout(400);
+  await page.evaluate(() => { window.__pingHold = setInterval(() => { window.rr.S.tel.ping = 700; }, 5); });
+  await page.waitForTimeout(1200);
+  const slowRun = await page.evaluate(() => window.rr.S.out.slice());
+  await page.click('#btnStop');
+  await page.evaluate(() => { clearInterval(window.__pingHold); window.rr.p.minSpeed = 25; });
+  check(slowRun[0] >= 30 && slowRun[1] >= 30, `lane keeper drives at 30+ even with a high ping reading (${slowRun})`);
+
   // An idle gamepad that is merely connected must not hold the car in Auto.
   await page.evaluate(() => { window.__gp = navigator.getGamepads; navigator.getGamepads = () => [{ connected: true, axes: [0, 0, 0, 0], buttons: [] }]; window.rr.transport.reset(); });
   await page.click('#btnGo');

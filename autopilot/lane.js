@@ -12,11 +12,8 @@
 
 const GIVE_UP_MS = 2500;
 
-// Slow link (measured ping above PING_OK): scale speed down, since the car covers more ground between readings.
-const PING_OK = 130;
-const ping = (typeof window !== 'undefined' && window.rr?.S?.tel?.ping) || PING_OK;
-const base = Math.round(Math.min(p.apBase, Math.max(p.minSpeed + 10, (p.apBase * PING_OK) / ping)));
-if (mem.slowLogged === undefined && base < p.apBase) { mem.slowLogged = true; ctx.log(`lane: slow link (ping ${ping.toFixed(0)} ms), speed capped at ${base}`); }
+// Never ask for less than the motors can turn, or the car just sits there humming.
+const base = Math.max(p.apBase, p.minSpeed + 5, 30);
 const gain = (p.apCurve ?? 10) / 100;
 const fade = p.apCurveDecay ?? 1500;
 const limit = (b) => Math.max(-0.8, Math.min(0.8, b));
