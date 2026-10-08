@@ -421,8 +421,8 @@ function target(t) {
     return trimmed(S.apOut.map((v) => toMotor(clamp((S.thr * v) / base, -1, 1))));
   }
   // Auto: touching a pad (or the gamepad) takes over while held; letting go hands control back.
-  if (S.armed && p.apOverride && (padSteer.active || padThrottle.active || S.gp.active)) return manual();
-  if (!S.armed || !fresh) return [0, 0];
+  if (!S.armed || (p.apOverride && (padSteer.active || padThrottle.active || S.gp.active))) return manual();
+  if (!fresh) return [0, 0];
   if (p.apStopDist > 0 && S.tel.dist > 0 && S.tel.dist < p.apStopDist && t - S.tel.distAt < 600) return [0, 0];
   return trimmed(S.apOut);
 }
@@ -681,7 +681,7 @@ function readInputs() {
 
 function onPadRelease() {
   // Lifting your thumb should stop the car right away, not on the next tick.
-  if (S.mode !== 'auto') drive(now());
+  if (S.mode !== 'auto' || !S.armed || p.apOverride) drive(now());
 }
 
 async function toggleTilt() {
