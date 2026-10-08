@@ -39,6 +39,8 @@ const PARAMS = [
   { g: 'Autopilot', k: 'apStopDist', label: 'Stop for obstacle closer than (cm, 0 = off)', min: 0, max: 50, step: 1, def: 0 },
   { g: 'Autopilot', k: 'apDepth', label: 'Line queries in flight', min: 1, max: 4, step: 1, def: 2, help: 'More = more sensor readings per second (BLE round trip is ~70 ms on iPhone), same delay per reading.' },
   { g: 'Autopilot', k: 'apDistEvery', label: 'Read distance every N line reads (0 = never)', min: 0, max: 50, step: 1, def: 0, help: '?DIST blocks the robot for up to ~30 ms, so keep this off unless you need it.' },
+  { g: 'Autopilot', k: 'apCurve', label: 'Curve learning (% per edge reading)', min: 0, max: 40, step: 1, def: 10, help: 'Lane keeper: how fast it learns which way the track bends. 0 = just bounce off the edges.' },
+  { g: 'Autopilot', k: 'apCurveDecay', label: 'Curve memory (ms)', min: 200, max: 5000, step: 100, def: 1500, help: 'Lane keeper: how long a learned bend lasts once the edges stop being touched.' },
   { g: 'Autopilot', k: 'apTimeoutMs', label: 'Stop if no sensor data for (ms)', min: 100, max: 1000, step: 10, def: 300 },
 
   { g: 'Link', k: 'tickMs', label: 'Control tick (ms)', min: 20, max: 150, step: 5, def: 50, help: 'In manual mode motors are updated at most once per tick. The firmware docs suggest 50–100.' },
@@ -47,6 +49,9 @@ const PARAMS = [
   { g: 'Link', k: 'keepAliveMs', label: 'Resend motor state every (ms)', min: 100, max: 2000, step: 50, def: 400 },
   { g: 'Link', k: 'withResponse', label: 'Write with response (slower, for debugging)', type: 'bool', def: false },
   { g: 'Link', k: 'autoReconnect', label: 'Auto-reconnect after a drop (brownout)', type: 'bool', def: true },
+
+  { g: 'Demo', k: 'simTrack', label: 'Demo track', type: 'select', options: ['lane', 'line'], def: 'lane', help: 'lane = white lane on black like the rally mat. line = black line on white.' },
+  { g: 'Demo', k: 'simLatency', label: 'Demo Bluetooth delay (ms round trip)', min: 0, max: 500, step: 10, def: 70 },
 
   { g: 'Lights', k: 'fx', label: 'Turn signals, brake light, underglow', type: 'bool', def: true },
   { g: 'Lights', k: 'headlight', label: 'Headlight brightness', min: 0, max: 255, step: 5, def: 80 },
@@ -819,7 +824,7 @@ async function startDemo() {
   const { SimTransport } = await import(`./sim.js?t=${T}`);
   const canvas = $('sim');
   canvas.classList.remove('hidden');
-  const sim = new SimTransport((text) => link.onText(text), canvas);
+  const sim = new SimTransport((text) => link.onText(text), canvas, () => ({ track: p.simTrack, latency: p.simLatency }));
   transport = sim;
   link.t = sim;
   setState('connected');

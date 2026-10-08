@@ -1,10 +1,12 @@
-// Demo mode: a fake Cutebot on a black-line oval that speaks the same UART protocol as microbitapi.js.
-// Lets you try the UI and autopilot scripts without a robot. Tap the drawing to put the car back on the start line.
-// It is only a sanity check: the real track's colors, sensor spacing and motor response will differ.
+// Demo mode: a fake Cutebot on an oval that speaks the same UART protocol as microbitapi.js.
+// Two tracks (Tune → Demo): "lane" is a wide white lane on black, like the real rally mat, where the lane
+// reads white and the mat black; "line" is a thin black line on white. Bluetooth delay is simulated too.
+// Tap the drawing to put the car back on the start line. Only a sanity check: the real robot will differ.
 
 const STRAIGHT = 120;      // cm, length of each straight
 const RADIUS = 45;         // cm, radius of the curves
-const LINE_HALF = 1.2;     // cm, half width of the black line
+const LINE_HALF = 1.2;     // cm, half width of the black line ("line" track)
+const LANE_HALF = 12;      // cm, half width of the white lane ("lane" track)
 const SENSOR_HALF = 0.8;   // cm, sensor offset left/right of center
 const SENSOR_AHEAD = 6;    // cm, sensors ahead of the wheel axle
 const WHEELBASE = 9;       // cm
@@ -12,8 +14,10 @@ const VMAX = 50;           // cm/s at motor 100
 const DEADBAND = 20;       // motor values below this do not move the wheel
 
 export class SimTransport {
-  constructor(onText, canvas) {
+  // opts() returns { track: 'lane' | 'line', latency: extra round-trip ms }, read live.
+  constructor(onText, canvas, opts = () => ({})) {
     this.onText = onText;
+    this.opts = opts;
     this.canvas = canvas;
     this.connected = true;
     this.name = 'BBC micro:bit [demo]';
@@ -43,7 +47,7 @@ export class SimTransport {
     while ((i = this.inbuf.indexOf('#')) >= 0) {
       const cmd = this.inbuf.slice(0, i).trim();
       this.inbuf = this.inbuf.slice(i + 1);
-      if (cmd) setTimeout(() => this.exec(cmd), 6 + Math.random() * 6);
+      if (cmd) setTimeout(() => this.exec(cmd), 6 + Math.random() * 6 + (this.opts().latency || 0) / 2);
     }
     await new Promise((r) => setTimeout(r, 2));
   }
@@ -54,7 +58,7 @@ export class SimTransport {
   }
 
   reply(s) {
-    setTimeout(() => this.connected && this.onText(s + '#\n'), 8 + Math.random() * 10);
+    setTimeout(() => this.connected && this.onText(s + '#\n'), 8 + Math.random() * 10 + (this.opts().latency || 0) / 2);
   }
 
   exec(cmd) {
@@ -128,11 +132,17 @@ export class SimTransport {
     ];
   }
 
+  get lane() { return this.opts().track !== 'line'; }
+
+  // true when a point reads black: off the lane, or on the line
+  black(x, y) {
+    const d = SimTransport.offTrack(x, y);
+    return this.lane ? d > LANE_HALF : d < LINE_HALF;
+  }
+
   lineCode() {
     const [left, right] = this.sensors();
-    const L = SimTransport.offTrack(...left) < LINE_HALF;
-    const R = SimTransport.offTrack(...right) < LINE_HALF;
-    return (L ? 2 : 0) + (R ? 1 : 0);
+    return (this.black(...left) ? 2 : 0) + (this.black(...right) ? 1 : 0);
   }
 
   draw() {
@@ -144,14 +154,14 @@ export class SimTransport {
     const W = (c.width = c.clientWidth * dpr);
     const H = (c.height = c.clientHeight * dpr);
     const g = c.getContext('2d');
-    const worldW = STRAIGHT + 2 * RADIUS + 30;
-    const worldH = 2 * RADIUS + 30;
+    const worldW = STRAIGHT + 2 * RADIUS + 2 * LANE_HALF + 10;
+    const worldH = 2 * RADIUS + 2 * LANE_HALF + 10;
     const k = Math.min(W / worldW, H / worldH);
     g.setTransform(k, 0, 0, -k, W / 2, H / 2);
-    g.fillStyle = '#f4f4f4';
+    g.fillStyle = this.lane ? '#111' : '#f4f4f4';
     g.fillRect(-worldW, -worldH, 2 * worldW, 2 * worldH);
-    g.strokeStyle = '#111';
-    g.lineWidth = LINE_HALF * 2;
+    g.strokeStyle = this.lane ? '#f4f4f4' : '#111';
+    g.lineWidth = (this.lane ? LANE_HALF : LINE_HALF) * 2;
     g.beginPath();
     g.moveTo(-STRAIGHT / 2, -RADIUS);
     g.lineTo(STRAIGHT / 2, -RADIUS);

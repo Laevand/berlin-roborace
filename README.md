@@ -27,7 +27,7 @@ To try it without a robot, add `?demo` to the URL. That gives you a simulated ca
 
 - **Manual:** left thumb steers and right thumb is the throttle. Both are floating joysticks, so put your thumb down anywhere. Lifting your thumb stops the car. You can switch to **Tilt** steering (zeroed at the angle where you turn it on) or the single-stick layout in Tune. A Bluetooth gamepad also works: left stick steers, RT/LT for throttle and reverse, A = horn, B = stop, Start = GO.
 - **Assist:** you hold the throttle and the autopilot steers from the line sensors. Steering hard yourself overrides it.
-- **Auto:** tap **GO** and the active Pilot script drives. The car stops automatically if sensor data goes stale. **STOP** always wins.
+- **Auto:** tap **GO** and the active Pilot script drives. On the rally mat the lane reads white and the mat black. Use **Edge follower** with *Invert sensors* OFF, and put the car's nose on the lane's left edge, facing the driving direction. The car stops automatically if sensor data goes stale. **STOP** always wins.
 - **FX** (contest bonus): amber turn signals that blink on the headlights, a red underglow brake light when slowing or reversing, and underglow that shifts blue → purple → pink with speed, matching the track. Horn, team name on the LED matrix, a lap timer and a live telemetry dashboard (line sensors, distance, ping, accelerometer, light and temperature) are also included.
 
 ## Race-day checklist

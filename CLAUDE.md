@@ -17,7 +17,10 @@ Win the Next App Robot Rally ([CONTEST.md](https://github.com/droidconHQ/CuteBot
 - The track is a wide pink → purple → blue lane with white edge lines on a black mat. It has an S-bend and a long loop.
 
 ## Open questions (update this list as answers come in)
-- What do the line sensors read on each surface? The user runs the "Sensor probe" script and reports from the Log tab.
+- ~~What do the line sensors read?~~ The whole lane (pink/purple/blue and its white edge lines) reads **white** and the mat outside reads **black**. So there is no line to follow, only a wide white lane.
+  - `autopilot/edge.js` rides the lane's left edge (black left, white right, Invert OFF). Its correction grows with time off the edge. In the `?demo` lane track (Tune → Demo track = lane), with a 70 ms delay it holds within ~2 cm at speed 60 and ~6 cm at 80. At 400 ms it needs speed ≤45.
+  - `autopilot/lane.js` stays inside the lane and learns the bend. It is shakier, so use it only if riding the edge isn't allowed.
+  - Bluetooth delay is the main limit on autopilot speed. Real-robot results are still unknown.
 - ~~Real BLE speed through Bluefy?~~ Measured Thu on robot `tupaz` (iPhone, iOS 18.7): ping 59/67/91 ms, one-at-a-time `?LINE` round trip 56/70/124 ms = **14 Hz**, 0 lost, 0 write errors. That is ~2 iOS connection intervals; the app can't change it. Autopilot now keeps `apDepth` (default 2) queries in flight for more readings per second. The delay per reading stays ~70 ms.
 - **The link speed varies a lot.** A later test on the same robot and phone measured ping 194/397/481 ms and a sequential `?LINE` rate of 3 Hz; with 3 in flight it was 16 Hz at 60/193/354 ms delay. Likely iOS moved to a much longer connection interval (other BT devices, Low Power Mode, crowded 2.4 GHz). The header now shows live ping and turns the dot amber above 150 ms. Manual telemetry keeps one query in flight, so replies can't pile up and block the robot's command handler. Still open: what causes the slow state, and whether reconnecting clears it.
 - Wheelies: at speed ~79 from a standstill the car nearly tips backward. The acceleration limit (`ramp`) is now on by default at 50. Straight-test trim on `tupaz` was +3.

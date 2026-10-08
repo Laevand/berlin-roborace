@@ -1,5 +1,6 @@
 [
-  { "file": "line.js", "name": "Line follower (2 sensors)" },
-  { "file": "edge.js", "name": "Edge follower (keep one sensor on the line)" },
+  { "file": "edge.js", "name": "Edge follower (rally mat: ride the lane's left edge)" },
+  { "file": "lane.js", "name": "Lane keeper (stay inside the lane, slower)" },
+  { "file": "line.js", "name": "Line follower (thin black line)" },
   { "file": "probe.js", "name": "Sensor probe (motors off, logs readings)" }
 ]
