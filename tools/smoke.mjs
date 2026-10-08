@@ -105,7 +105,7 @@ try {
       const b = enc.encode(s);
       for (let i = 0; i < b.length; i += 20) {
         const chunk = b.slice(i, i + 20);
-        setTimeout(() => { const ev = new Event('characteristicvaluechanged'); Object.defineProperty(ev, 'target', { value: { value: new DataView(chunk.buffer) } }); txc.dispatchEvent(ev); }, 8 + i);
+        setTimeout(() => { const ev = new Event('characteristicvaluechanged'); Object.defineProperty(ev, 'target', { value: { value: new DataView(chunk.buffer) } }); txc.dispatchEvent(ev); }, 8 + i + (window.__ble.delay || 0));
       }
     };
     const replies = { '?LINE': 'LINE:2', '?ACCEL': 'ACCEL:-1023,-1012,-1004', '?DIST': 'DIST:42', PING: 'PONG', '?LIGHT': 'LIGHT:140', '?TEMP': 'TEMP:23' };
@@ -142,7 +142,14 @@ try {
   await page2.waitForTimeout(2500);
   const st = await page2.evaluate(() => ({ opts: window.__ble.opts, tel: window.rr.S.tel, status: document.getElementById('status').textContent }));
   check(st.opts.filters[0].name === 'BBC micro:bit [tuzov]', 'robot ID filters the device picker');
-  check(st.status === 'tuzov', 'status shows robot ID');
+  check(st.status.startsWith('tuzov'), `status shows robot ID (${st.status})`);
+  // Slow link: replies take 300 ms. Manual telemetry must not pile up queries.
+  await page2.evaluate(() => { window.__ble.delay = 300; window.__ble.got.length = 0; });
+  await page2.waitForTimeout(2000);
+  const q = await page2.evaluate(() => window.__ble.got.filter((c) => c.startsWith('?') || c === 'PING').length);
+  await page2.evaluate(() => { window.__ble.delay = 0; });
+  await page2.waitForTimeout(400);
+  check(q <= 8, `telemetry keeps one query in flight on a slow link (${q} queries in 2 s)`);
   check(st.tel.line === 2 && st.tel.dist === 42 && st.tel.ping > 0, 'telemetry LINE/DIST/PING parsed');
   check(JSON.stringify(st.tel.accel) === '[-1023,-1012,-1004]', 'reply split across 20-byte packets reassembled');
   await page2.evaluate(() => window.rr.link.send('DISP,A VERY LONG TEAM NAME 123'));

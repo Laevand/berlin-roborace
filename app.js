@@ -282,6 +282,7 @@ function onMessage(msg) {
   const t = now();
   const w = waiters[key];
   if (w) { delete waiters[key]; clearTimeout(w.timer); w.res(val); }
+  S.telAt = 0;
   switch (key) {
     case 'LINE': {
       const code = parseInt(val, 10) & 3;
@@ -304,7 +305,7 @@ function onMessage(msg) {
     case 'TEMP': S.tel.temp = parseInt(val, 10); break;
     case 'COMPASS': log('rx', 'compass ' + val); break;
     case 'PONG':
-      if (S.pingAt) { S.tel.ping = t - S.pingAt; S.pingAt = 0; }
+      if (S.pingAt) { S.tel.ping = t - S.pingAt; S.tel.pingT = t; S.pingAt = 0; }
       if (ui.pingManual) { log('rx', `PONG ${S.tel.ping?.toFixed(0)} ms`); ui.pingManual = false; }
       break;
     default:
@@ -314,10 +315,11 @@ function onMessage(msg) {
 
 function query(q, t = now()) {
   if (q === 'PING') {
-    if (S.pingAt && t - S.pingAt < 2000) return;
+    if (S.pingAt && t - S.pingAt < 2000) return false;
     S.pingAt = t;
   }
   link.send(q);
+  return true;
 }
 
 // Keeps apDepth ?LINE queries in flight, so readings arrive faster than one BLE round trip.
@@ -596,7 +598,11 @@ function tick() {
   drive(t);
   if (S.testing) return;
   if (S.mode === 'manual') {
-    if (p.telemetry && ++S.telN % p.telEvery === 0 && link.backlog() === 0) query(ROTA[S.rot++ % ROTA.length], t);
+    // One telemetry query in flight at most. On a slow link, queued replies make the robot's
+    // command handler wait for Bluetooth, which delays motor commands.
+    if (p.telemetry && ++S.telN % p.telEvery === 0 && link.backlog() === 0 && (!S.telAt || t - S.telAt > 600)) {
+      if (query(ROTA[S.rot++ % ROTA.length], t)) S.telAt = t;
+    }
   } else {
     pumpLine(t);
   }
@@ -750,6 +756,7 @@ function setState(st) {
   const dot = $('dot');
   dot.className = 'dot' + (st === 'connected' ? ' ok' : st === 'connecting' || st === 'reconnecting' ? ' busy' : '');
   const name = transport?.name?.match(/\[(.+)\]/)?.[1] || transport?.name || '';
+  ui.name = name;
   $('status').textContent = { connected: name || 'Connected', connecting: 'Connecting…', reconnecting: 'Reconnecting…', disconnected: 'Offline' }[st];
   $('btnConnect').textContent = st === 'connected' || st === 'reconnecting' ? 'Disconnect' : 'Connect';
   if (st === 'connected') {
@@ -959,6 +966,12 @@ function render(ts) {
   if (ts - lastRender < 60) return;
   lastRender = ts;
   const t = now();
+  if (link.connected) {
+    // Link health in the header: amber dot when Bluetooth is slow.
+    const fresh = S.tel.ping != null && t - (S.tel.pingT || 0) < 6000;
+    $('status').textContent = fresh ? `${ui.name || 'Connected'} · ${S.tel.ping.toFixed(0)} ms` : ui.name || 'Connected';
+    $('dot').classList.toggle('slow', fresh && S.tel.ping > 150);
+  }
   setBar($('mL'), $('mLv'), S.out[0]);
   setBar($('mR'), $('mRv'), S.out[1]);
   const code = t - S.tel.lineAt < 1500 ? S.tel.line : null;
