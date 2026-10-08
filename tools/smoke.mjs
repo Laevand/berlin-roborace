@@ -66,6 +66,7 @@ try {
     if (last) travelled += Math.hypot(st.x - last.x, st.y - last.y);
     last = st;
   }
+  check(await page.evaluate(() => window.rr.S.lineSent.length <= window.rr.p.apDepth), 'line queries in flight stay within apDepth');
   check(maxOff < 3, `autopilot stays on the line (max ${maxOff.toFixed(2)} cm off)`);
   check(travelled > 100, `autopilot makes progress (${travelled.toFixed(0)} cm in 12 s)`);
   await page.click('#btnStop');
@@ -149,9 +150,9 @@ try {
   check(await page2.evaluate(() => window.__ble.got.includes('DISP,A VERY LONG TEAM NAME 123') && window.__ble.maxWrite <= 20), 'long commands chunked to 20 bytes');
   await page2.click('#tabSeg button[data-tab=log]');
   await page2.click('#btnLinkTest');
-  await page2.waitForTimeout(5000);
+  await page2.waitForFunction(() => document.getElementById('log').textContent.includes('LINK TEST'), null, { timeout: 15000 }).catch(() => {});
   const report = await page2.evaluate(() => [...document.querySelectorAll('#log span')].map((x) => x.textContent).find((t) => t.includes('LINK TEST')) || '');
-  check(/10\/10 answered/.test(report) && / \d+ Hz, 0 lost/.test(report), `link test reports ping and loop rate: ${report.replace(/^[\d.]+\s+/, '')}`);
+  check(/10\/10 answered/.test(report) && / \d+ Hz, 0 lost/.test(report) && /x3 in flight [1-9]\d* Hz/.test(report), `link test reports ping and loop rate: ${report.replace(/^[\d.]+\s+/, '')}`);
   await page2.evaluate(() => { const d = window.__ble.dev; d.gatt.connected = false; d.dispatchEvent(new Event('gattserverdisconnected')); });
   await page2.waitForTimeout(1500);
   check(await page2.evaluate(() => window.rr.link.connected), 'auto-reconnects after a drop');

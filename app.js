@@ -25,7 +25,7 @@ const PARAMS = [
   { g: 'Drive', k: 'steerGain', label: 'Steer strength', min: 0.1, max: 1, step: 0.05, def: 0.6, help: '0.5 = inner wheel stops at full lock, 1 = inner wheel reverses.' },
   { g: 'Drive', k: 'steerExpo', label: 'Steer expo', min: 0, max: 1, step: 0.05, def: 0.35, help: 'Higher = softer response near the center.' },
   { g: 'Drive', k: 'pivot', label: 'Spin speed when not moving', min: 0, max: 1, step: 0.05, def: 0.5 },
-  { g: 'Drive', k: 'ramp', label: 'Acceleration limit (motor units per 100 ms, 0 = off)', min: 0, max: 200, step: 5, def: 0, help: 'If the robot reboots (sad then happy face) when you floor it, try 40–80. Braking is never limited.' },
+  { g: 'Drive', k: 'ramp', label: 'Acceleration limit (motor units per 100 ms, 0 = off)', min: 0, max: 200, step: 5, def: 50, help: 'Stops wheelies and brownout reboots when you floor it. Lower = gentler. Braking is never limited.' },
   { g: 'Drive', k: 'padRadius', label: 'Joystick travel (px)', min: 30, max: 160, step: 5, def: 80 },
   { g: 'Drive', k: 'layout', label: 'Layout', type: 'select', options: ['dual', 'stick'], def: 'dual', help: 'dual = steer with left thumb, throttle with right. stick = one floating joystick.' },
   { g: 'Drive', k: 'tiltRange', label: 'Tilt for full lock (°)', min: 10, max: 60, step: 1, def: 30 },
@@ -37,6 +37,7 @@ const PARAMS = [
   { g: 'Autopilot', k: 'apLostMs', label: 'Line lost → hard turn after (ms)', min: 0, max: 1000, step: 10, def: 150 },
   { g: 'Autopilot', k: 'apInvert', label: 'Invert sensors (follow a white line on a dark floor)', type: 'bool', def: false },
   { g: 'Autopilot', k: 'apStopDist', label: 'Stop for obstacle closer than (cm, 0 = off)', min: 0, max: 50, step: 1, def: 0 },
+  { g: 'Autopilot', k: 'apDepth', label: 'Line queries in flight', min: 1, max: 4, step: 1, def: 2, help: 'More = more sensor readings per second (BLE round trip is ~70 ms on iPhone), same delay per reading.' },
   { g: 'Autopilot', k: 'apDistEvery', label: 'Read distance every N line reads (0 = never)', min: 0, max: 50, step: 1, def: 0, help: '?DIST blocks the robot for up to ~30 ms, so keep this off unless you need it.' },
   { g: 'Autopilot', k: 'apTimeoutMs', label: 'Stop if no sensor data for (ms)', min: 100, max: 1000, step: 10, def: 300 },
 
@@ -64,6 +65,11 @@ const store = {
 
 const defaults = () => Object.fromEntries(PARAMS.map((x) => [x.k, x.def]));
 const p = Object.assign(defaults(), pick(store.get('params', {})));
+// v2: acceleration limit became on by default after wheelies at speed ~80 on the real robot.
+if (store.get('paramsV', 1) < 2) {
+  if (p.ramp === 0) p.ramp = 50;
+  store.set('paramsV', 2);
+}
 function pick(obj) {
   const out = {};
   for (const x of PARAMS) if (obj && x.k in obj) out[x.k] = obj[x.k];
@@ -246,7 +252,7 @@ const S = {
   out: [0, 0],               // last motor values sent
   lastMotor: '', lastMotorAt: 0,
   apOut: null, apFn: null, mem: {},
-  lineOut: false, lineOutAt: 0, lineReads: 0, lineTimes: [], lineHist: [],
+  lineSent: [], lineReads: 0, lineTimes: [], lineHist: [],
   pingAt: 0,
   tel: { line: null, lineAt: 0, dist: null, distAt: 0, accel: null, light: null, temp: null, ping: null },
   fx: {}, fxPrevAvg: 0, brakeUntil: 0,
@@ -280,14 +286,15 @@ function onMessage(msg) {
     case 'LINE': {
       const code = parseInt(val, 10) & 3;
       S.tel.line = code; S.tel.lineAt = t;
-      S.lineOut = false;
+      S.lineSent.shift();
+      if (S.onLineTest) S.onLineTest();
       S.lineTimes.push(t);
       S.lineHist.push([t, code]);
       if (S.lineHist.length > 400) S.lineHist.splice(0, 100);
       if (S.mode !== 'manual') {
         runAutopilot(code, t);
         drive(t);
-        queryLine(t);
+        pumpLine(t);
       }
       break;
     }
@@ -313,9 +320,14 @@ function query(q, t = now()) {
   link.send(q);
 }
 
+// Keeps apDepth ?LINE queries in flight, so readings arrive faster than one BLE round trip.
+function pumpLine(t) {
+  while (S.lineSent.length && t - S.lineSent[0] > 400) S.lineSent.shift(); // reply lost
+  while (S.lineSent.length < p.apDepth) queryLine(t);
+}
+
 function queryLine(t) {
-  S.lineOut = true;
-  S.lineOutAt = t;
+  S.lineSent.push(t);
   S.lineReads++;
   link.send('?LINE');
   if (p.apDistEvery > 0 && S.lineReads % p.apDistEvery === 0) link.send('?DIST');
@@ -443,7 +455,7 @@ function arm() {
   S.mem = {};
   S.apOut = null;
   S.armed = true;
-  queryLine(now());
+  pumpLine(now());
   if (!lap.running) lapStartStop();
   renderModeUi();
 }
@@ -457,6 +469,7 @@ function disarm(why) {
 function setMode(m) {
   emergencyStop();
   S.mode = m;
+  S.lineSent = [];
   S.apOut = null;
   S.mem = {};
   renderModeUi();
@@ -488,9 +501,21 @@ async function linkTest() {
       link.send('?LINE');
       if ((await expect('LINE', 500)) === null) lost++; else rtts.push(now() - t0);
     }
+    // Pipelined: 3 queries in flight, like the autopilot loop with apDepth 3.
+    const sent = [];
+    const lat = [];
+    S.onLineTest = () => { if (sent.length) lat.push(now() - sent.shift()); };
+    const end2 = now() + 3000;
+    while (now() < end2) {
+      while (sent.length < 3) { sent.push(now()); link.send('?LINE'); }
+      await sleep(5);
+    }
+    await sleep(500);
+    S.onLineTest = null;
     const stat = (a) => (a.length ? `${Math.min(...a).toFixed(0)}/${(a.reduce((x, y) => x + y, 0) / a.length).toFixed(0)}/${Math.max(...a).toFixed(0)} ms` : 'none');
     log('ap', `LINK TEST: ping min/avg/max ${stat(pings)} (${pings.length}/10 answered) | ` +
-      `LINE round trip ${stat(rtts)} = ${(rtts.length / 3).toFixed(0)} Hz, ${lost} lost | write errors ${link.errCount - errs0} | ` +
+      `LINE round trip ${stat(rtts)} = ${(rtts.length / 3).toFixed(0)} Hz, ${lost} lost | ` +
+      `LINE x3 in flight ${(lat.length / 3).toFixed(0)} Hz, delay ${stat(lat)}, ${sent.length} lost | write errors ${link.errCount - errs0} | ` +
       `robot ${transport?.name || '?'} | ${(navigator.userAgent.match(/iPhone OS [\d_]+/) || [''])[0]}`);
   } finally {
     S.testing = false;
@@ -572,8 +597,8 @@ function tick() {
   if (S.testing) return;
   if (S.mode === 'manual') {
     if (p.telemetry && ++S.telN % p.telEvery === 0 && link.backlog() === 0) query(ROTA[S.rot++ % ROTA.length], t);
-  } else if (!S.lineOut || t - S.lineOutAt > 150) {
-    queryLine(t);
+  } else {
+    pumpLine(t);
   }
   fxTick(t);
 }
@@ -731,7 +756,7 @@ function setState(st) {
     link.clear();
     S.fx = {};
     S.lastMotor = '';
-    S.lineOut = false;
+    S.lineSent = [];
     link.pump();
     wakeLock();
     log('ap', `Connected to ${transport?.name}`);
@@ -759,7 +784,9 @@ async function connect() {
     await bt.request(store.get('robotId', ''));
     store.set('lastDevice', bt.device.id);
   } catch (e) {
-    log('err', 'Connect: ' + (e.message || e));
+    const why = [e?.name, e?.message].filter(Boolean).join(': ') || String(e);
+    log('err', `Connect failed (${why}). Check: Bluetooth on, Bluefy allowed to use Bluetooth (iPhone Settings → Bluefy), ` +
+      'Robot ID correct, and no other phone connected to this robot. Cancelling the device list also lands here.');
     setState('disconnected');
   }
 }

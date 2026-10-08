@@ -18,7 +18,8 @@ Win the Next App Robot Rally ([CONTEST.md](https://github.com/droidconHQ/CuteBot
 
 ## Open questions (update this list as answers come in)
 - What do the line sensors read on each surface? The user runs the "Sensor probe" script and reports from the Log tab.
-- What line-loop rate (Line Hz) and ping do we get on real BLE through Bluefy? This decides how fast the autopilot can go.
+- ~~Real BLE speed through Bluefy?~~ Measured Thu on robot `tupaz` (iPhone, iOS 18.7): ping 59/67/91 ms, one-at-a-time `?LINE` round trip 56/70/124 ms = **14 Hz**, 0 lost, 0 write errors. That is ~2 iOS connection intervals; the app can't change it. Autopilot now keeps `apDepth` (default 2) queries in flight for more readings per second. The delay per reading stays ~70 ms. The pipelined rate is still unmeasured.
+- Wheelies: at speed ~79 from a standstill the car nearly tips backward. The acceleration limit (`ramp`) is now on by default at 50. Straight-test trim on `tupaz` was +3.
 - Do the organizers accept a web app in Bluefy as the entry? If not, the fallback is a native WKWebView shell with a CoreBluetooth bridge, built in the cloud and installed via TestFlight with the user's Apple signing assets.
 
 ## Working with the user
