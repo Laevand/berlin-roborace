@@ -21,6 +21,8 @@ if (!c || !c.found || s.t - c.t > LOST_MS) {
 }
 if (mem.mode !== 'cam') { mem.mode = 'cam'; ctx.log('camera pilot: steering from the camera'); }
 const base = Math.max(p.apBase, p.minSpeed + 5, 30);
+// The camera learns which way the car faces from how it moves, so until it has moved, creep straight ahead.
+if (!c.moving) return [Math.max(p.minSpeed + 5, 30), Math.max(p.minSpeed + 5, 30)];
 const turn = Math.max(-1, Math.min(1, (c.steer / 45) * p.camGain - c.offset * p.camCenter)); // + = right
 const sp = Math.max(p.minSpeed + 5, base * (1 - p.camSlow * Math.abs(turn)));
 const l = sp * (1 + turn), r = sp * (1 - turn);

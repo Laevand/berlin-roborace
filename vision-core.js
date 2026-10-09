@@ -611,3 +611,114 @@ function solve3(A, b) {
   }
   return [M[0][3] / M[0][0], M[1][3] / M[1][1], M[2][3] / M[2][2]];
 }
+
+// Follows the robot you tapped by what it looks like (a small template matched around where it was), so it works
+// anywhere in the picture, on the lane or off it, and needs no lane mask or beacon. Heading comes from how the robot
+// moves in the picture (it only drives forward); before it has moved, from the lane direction. Then it measures
+// offset in the lane and the steer direction with the same rays as Vision. apply() overwrites those fields of
+// Vision.process()'s result; until start() is called it leaves the result alone.
+export class Follower {
+  constructor() { this.reset(); }
+  reset() {
+    this.pos = null; this.tpl = null; this.S = 0; this.hist = []; this.heading = null; this.from = null;
+    this.missed = 0; this.steerS = null; this.age = 0;
+  }
+  get active() { return !!this.pos; }
+  start(data, w, h, x, y, W) {
+    const S = Math.max(9, Math.min(41, Math.round(0.55 * W))) | 1;
+    this.S = S; this.w = w; this.h = h; this.pos = [x, y]; this.hist = []; this.heading = null; this.from = null;
+    this.missed = 0; this.steerS = null; this.age = 0;
+    this.tpl = this.grab(data, x, y);
+  }
+  grab(data, x, y) {
+    const { S, w, h } = this, r = S >> 1, t = new Float32Array(S * S * 3);
+    for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+      const xx = Math.max(0, Math.min(w - 1, Math.round(x) - r + i)), yy = Math.max(0, Math.min(h - 1, Math.round(y) - r + j)), k = (yy * w + xx) * 4, o = (j * S + i) * 3;
+      t[o] = data[k]; t[o + 1] = data[k + 1]; t[o + 2] = data[k + 2];
+    }
+    return t;
+  }
+  // mean abs difference of the template against the picture at (cx, cy), sampled every st px; stops early above `cut`
+  cost(data, cx, cy, st, cut) {
+    const { S, w, h, tpl } = this, r = S >> 1;
+    let sum = 0, n = 0;
+    for (let j = 0; j < S; j += st) for (let i = 0; i < S; i += st) {
+      const xx = cx - r + i, yy = cy - r + j;
+      if (xx < 0 || yy < 0 || xx >= w || yy >= h) { sum += 255 * 3; n++; continue; }
+      const k = (yy * w + xx) * 4, o = (j * S + i) * 3;
+      sum += Math.abs(data[k] - tpl[o]) + Math.abs(data[k + 1] - tpl[o + 1]) + Math.abs(data[k + 2] - tpl[o + 2]);
+      n++;
+    }
+    return sum / (3 * n);
+  }
+  apply(res, data, vis, tMs) {
+    if (!this.pos) return res;
+    const { S, w, h } = this, W = vis.W;
+    // 1. find the template again near the last position
+    const st = Math.max(1, Math.floor(S / 9)), R = Math.min(2.5 * S, S * (0.7 + 0.25 * this.missed));
+    let best = Infinity, bx = Math.round(this.pos[0]), by = Math.round(this.pos[1]);
+    const cx0 = bx, cy0 = by;
+    for (let dy = -R; dy <= R; dy += st) for (let dx = -R; dx <= R; dx += st) {
+      const c = this.cost(data, cx0 + Math.round(dx), cy0 + Math.round(dy), st) + 0.15 * Math.hypot(dx, dy);
+      if (c < best) { best = c; bx = cx0 + Math.round(dx); by = cy0 + Math.round(dy); }
+    }
+    const fx = bx, fy = by;
+    for (let dy = -st; dy <= st; dy++) for (let dx = -st; dx <= st; dx++) {
+      const c = this.cost(data, fx + dx, fy + dy, 1);
+      if (c < best) { best = c; bx = fx + dx; by = fy + dy; }
+    }
+    const good = this.cost(data, bx, by, 1) < 45;
+    if (good) {
+      this.pos = [bx, by];
+      this.missed = 0;
+      const nt = this.grab(data, bx, by);
+      for (let i = 0; i < nt.length; i++) this.tpl[i] += (nt[i] - this.tpl[i]) * 0.12; // follow slow appearance changes
+      this.age++;
+    } else this.missed++;
+    if (this.missed > 30) { this.pos = null; return { ...res, robot: null, found: false, mine: null }; }
+    const [x, y] = this.pos;
+    // 2. heading from motion over the last ~0.3 s
+    if (good) {
+      this.hist.push([tMs, x, y]);
+      while (this.hist.length > 2 && tMs - this.hist[0][0] > 300) this.hist.shift();
+      const [t0, x0, y0] = this.hist[0], d = Math.hypot(x - x0, y - y0);
+      if (tMs - t0 > 200 && d > 0.5 * S) {
+        const nx = (x - x0) / d, ny = (y - y0) / d;
+        if (this.from === 'motion' && this.heading) {
+          const mx = this.heading[0] * 0.6 + nx * 0.4, my = this.heading[1] * 0.6 + ny * 0.4, m = Math.hypot(mx, my) || 1;
+          this.heading = [mx / m, my / m];
+        } else this.heading = [nx, ny];
+        this.from = 'motion';
+      }
+    }
+    if (!this.heading && res.axis) { this.heading = [...res.axis]; this.from = 'lane'; }
+    // 3. offset and steer from the lane mask around the robot
+    const out = { ...res, robot: [x, y], found: good, lost: this.missed, mine: 1, headingFrom: this.from, heading: this.heading,
+      offset: null, steer: null, ahead: null, fan: null, onLane: false, Wr: vis.Wat(x, y) };
+    const half = S / 2 + 1;
+    out.tracks = [{ id: 1, x, y, box: [x - half, y - half, x + half, y + half], missed: this.missed, beacon: false, mine: true },
+      ...res.tracks.filter((tr) => !tr.mine && Math.hypot(tr.x - x, tr.y - y) > 0.5 * W)];
+    const xi = Math.round(x), yi = Math.round(y);
+    out.onLane = xi >= 0 && yi >= 0 && xi < w && yi < h && !!vis.drive[yi * w + xi];
+    if (this.heading && out.onLane) {
+      const [dx, dy] = this.heading, Wl = out.Wr, max = 4 * Wl;
+      const L = vis.ray(x, y, dy, -dx, max), Rr = vis.ray(x, y, -dy, dx, max);
+      out.dl = L.t; out.dr = Rr.t;
+      out.offset = (L.t - Rr.t) / Math.max(1, L.t + Rr.t);
+      out.offsetSure = L.edge && Rr.edge;
+      out.ahead = vis.ray(x, y, dx, dy, max).t / Wl;
+      out.fan = [];
+      let bestA = 0, bestT = -1;
+      for (let a = -60; a <= 60; a += 10) {
+        const ar = (a * Math.PI) / 180, c = Math.cos(ar), s = Math.sin(ar);
+        const fx2 = dx * c - dy * s, fy2 = dy * c + dx * s;
+        const r = vis.ray(x, y, fx2, fy2, max).t;
+        out.fan.push([a, r, fx2, fy2]);
+        if (r > bestT + 0.5 || (Math.abs(r - bestT) <= 0.5 && Math.abs(a) < Math.abs(bestA))) { bestT = r; bestA = a; }
+      }
+      this.steerS = this.steerS == null ? bestA : this.steerS + (bestA - this.steerS) * 0.35; // smooth: the longest ray jumps
+      out.steer = Math.round(this.steerS);
+    }
+    return out;
+  }
+}

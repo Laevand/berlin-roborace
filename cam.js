@@ -3,7 +3,7 @@
 
 const PROC_W = 160;
 const cam = { running: false };
-let Vision, VDEFAULTS, video, canvas, g, proc, pg, vis, w = 0, h = 0, img, res = null, last = 0;
+let lastData, Vision, VDEFAULTS, Follower, follow, video, canvas, g, proc, pg, vis, w = 0, h = 0, img, res = null, last = 0;
 
 // the Vision page's saved settings (rr.vision) apply here too, so what looks right there drives here
 function params() {
@@ -26,10 +26,10 @@ function ensureDom() {
   proc = document.createElement('canvas');
   pg = proc.getContext('2d', { willReadFrequently: true });
   canvas.addEventListener('pointerdown', (e) => {
-    if (!vis) return;
+    if (!vis || !lastData) return;
     const r = canvas.getBoundingClientRect();
     const x = ((e.clientX - r.left) / r.width) * w, y = ((e.clientY - r.top) / r.height) * h;
-    if (vis.select(x, y) == null) vis.seed(x, y);
+    follow.start(lastData, w, h, x, y, vis.W);
   });
 }
 
@@ -40,7 +40,7 @@ export async function start(log) {
   fitBar();
   addEventListener('resize', fitBar);
   if (cam.running) return;
-  if (!Vision) ({ Vision, VDEFAULTS } = await import('./vision-core.js?t=' + (window.BUILD_T || Date.now())));
+  if (!Vision) ({ Vision, VDEFAULTS, Follower } = await import('./vision-core.js?t=' + (window.BUILD_T || Date.now())));
   if (!navigator.mediaDevices?.getUserMedia) { log('err', 'camera: not available in this browser'); return; }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } });
@@ -68,6 +68,7 @@ function setup() {
   proc.width = w;
   proc.height = h;
   vis = new Vision(w, h);
+  follow = new Follower();
   canvas.width = w * 3;
   canvas.height = h * 3;
 }
@@ -80,13 +81,13 @@ function loop(ts) {
   if (ts - last < 40) return; // ~25 fps max
   last = ts;
   pg.drawImage(video, 0, 0, w, h);
-  const data = pg.getImageData(0, 0, w, h).data;
-  try { res = vis.process(data, ts, params()); } catch (e) { res = null; return; }
+  const data = lastData = pg.getImageData(0, 0, w, h).data;
+  try { res = follow.apply(vis.process(data, ts, params()), data, vis, ts); } catch (e) { res = null; return; }
   const ok = res && res.found && res.offset != null && res.steer != null;
   window.__rrCam = {
     t: performance.now(), found: !!ok, mine: res ? res.mine != null : false,
     offset: ok ? res.offset : 0, steer: ok ? res.steer : 0, ahead: ok ? res.ahead : 0,
-    lost: res ? res.lost : null,
+    lost: res ? res.lost : null, moving: !!res && res.headingFrom === 'motion',
   };
   draw(ok);
 }

@@ -3,8 +3,9 @@
 // the phone or the robots move). Not connected to driving yet: the goal is to see that it finds the lane and the robot
 // reliably from any angle before it gets near the control loop. The camera only runs while the tab is open.
 const T = new URL(import.meta.url).search;
-const { Vision, VDEFAULTS, classify, contour } = await import('./vision-core.js' + T);
+const { Vision, VDEFAULTS, Follower, classify, contour } = await import('./vision-core.js' + T);
 
+const follow = new Follower();
 const SLIDERS = [
   ['procW', 'Resolution (px wide)', 160, 320, 40],
   ['hueLo', 'Lane hue from', 0, 360, 1],
@@ -103,7 +104,7 @@ $('vView').onclick = (e) => { if (e.target.dataset.v) { p.view = e.target.datase
 $('vCenter').onchange = (e) => { p.center = e.target.checked ? 1 : 0; save(); draw(); };
 $('vSrc').onchange = (e) => { p.robotSrc = e.target.value; save(); vis?.reset(); };
 $('vFreeze').onclick = () => { frozen = !frozen; $('vFreeze').classList.toggle('on', frozen); $('vFreeze').textContent = frozen ? 'Frozen' : 'Freeze'; };
-$('vReset').onclick = () => { vis?.reset(); };
+$('vReset').onclick = () => { follow.reset(); vis?.reset(); };
 $('vDefaults').onclick = () => { Object.assign(p, DEFAULTS, { v: SETTINGS_V }); save(); buildSliders(); setup(); };
 $('vCopy').onclick = async () => {
   const rep = { build: T, size: [w, h], fps: +fps.toFixed(1), ms: res && +res.ms.toFixed(1), W: res && +res.W.toFixed(1),
@@ -175,6 +176,7 @@ function loop(ts) {
   pg.drawImage(video, 0, 0, w, h);
   img = pg.getImageData(0, 0, w, h);
   res = vis.process(img.data, ts, p);
+  if (!demo) res = follow.apply(res, img.data, vis, ts);
   draw();
   readouts();
 }
@@ -282,6 +284,12 @@ can.addEventListener('pointerdown', (e) => {
   const rc = can.getBoundingClientRect();
   const fx = ((e.clientX - rc.left) / rc.width) * w, fy = ((e.clientY - rc.top) / rc.height) * h;
   const x = Math.max(0, Math.min(w - 1, Math.floor(fx))), y = Math.max(0, Math.min(h - 1, Math.floor(fy)));
+  if (!demo) {
+    follow.start(img.data, w, h, fx, fy, vis.W);
+    inspect = null;
+    $('vInspect').textContent = 'Following the robot you tapped (anywhere in the picture). Tap again to pick another.';
+    return;
+  }
   const id = vis.select(fx, fy);
   if (id != null) {
     inspect = null;

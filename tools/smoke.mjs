@@ -332,7 +332,7 @@ try {
 
   // 3. Camera vision (the Vision tab): the pipeline against the synthetic camera's ground truth (my robot plus two
   // others on the lane), then the tab itself. Without the beacon, a tap on my robot's box stands in for the user.
-  const { Vision, VDEFAULTS, contour } = await import('../vision-core.js');
+  const { Vision, VDEFAULTS, Follower, contour } = await import('../vision-core.js');
   const { SynthCam, score } = await import('./vision-synth.js');
   for (const [cam, beacon] of [['follow', true], ['high', true], ['side', true], ['follow', false], ['side', false]]) {
     const vw = 240, vh = 180, sc = new SynthCam(vw, vh, { cam, beacon }), vis = new Vision(vw, vh), buf = new Uint8ClampedArray(vw * vh * 4);
@@ -353,6 +353,27 @@ try {
     // floor is enforced. Make these hard checks again when vision is retuned on this track.
     console.log(`info vision ${tag}: my robot locked ${ok}/${vis0} (${taps} taps), lane IoU ${(iou / n).toFixed(3)}, boxes on robots in view ${seen}/${all} (${boxes} boxes), offset side ${side}/${sideN}, heading ${head}/${headN}`);
     check(iou / n > 0.8 && ok > 0, `vision finds the lane (IoU ${(iou / n).toFixed(3)}) and locks on my robot at all, ${tag}`);
+  }
+  for (const cam of ['follow', 'high', 'side']) {
+    // The follower: tap once on my robot (no beacon), then it must stay on it and point along its motion.
+    const vw = 240, vh = 180, sc = new SynthCam(vw, vh, { cam, beacon: false }), vis = new Vision(vw, vh), fo = new Follower(), buf = new Uint8ClampedArray(vw * vh * 4);
+    let n = 0, near = 0, headN = 0, headOk = 0, steerJump = 0, prev = null;
+    const trail = [];
+    for (let k = 0; k < 240; k++) {
+      const gt = sc.render(k / 30, buf);
+      let res = vis.process(buf, (k * 1000) / 30, VDEFAULTS);
+      if (!fo.active && gt.robot && k > 3) fo.start(buf, vw, vh, gt.robot[0], gt.robot[1], vis.W);
+      res = fo.apply(res, buf, vis, (k * 1000) / 30);
+      if (!fo.active || !gt.robot || k < 40) continue;
+      n++;
+      trail.push(gt.robot); if (trail.length > 9) trail.shift();
+      const moved = trail.length === 9 && Math.hypot(trail[8][0] - trail[0][0], trail[8][1] - trail[0][1]) > 0.8 * fo.S;
+      if (res.robot && Math.hypot(res.robot[0] - gt.robot[0], res.robot[1] - gt.robot[1]) < 0.6 * vis.W) near++;
+      if (moved && res.heading && gt.heading && res.headingFrom === 'motion') { headN++; headOk += res.heading[0] * gt.heading[0] + res.heading[1] * gt.heading[1] > 0.7 ? 1 : 0; }
+      if (res.steer != null) { if (prev != null && Math.abs(res.steer - prev) > 25) steerJump++; prev = res.steer; }
+    }
+    console.log(`info follower ${cam}: on the robot ${near}/${n}, heading ${headOk}/${headN}, steer jumps ${steerJump}`);
+    check(n > 100 && near / n > 0.8 && (headN < 10 || headOk / headN > 0.8), `follower stays on a tapped robot (${near}/${n}) and points along its motion (${headOk}/${headN}), ${cam} camera`);
   }
   {
     // the real mat (photo, Fri): S-bend strands only half a lane apart, a robot on one strand, a green cushion off the mat
