@@ -140,16 +140,19 @@ try {
   check(!!through, `explore map lets taps through to the controls (${through})`);
   await page.click('#rrMapPlace');
   await page.waitForTimeout(400);
-  // Touch the map where the car is and drag its heading (straight up = +90°).
-  const want = await page.evaluate(([x, y]) => { const v = window.__rrMapView, d = devicePixelRatio; return [v.x0 + (x * d) / v.sc, v.y1 - (y * d) / v.sc]; }, [mb.width / 2, mb.height / 2]);
-  await page.mouse.move(mb.x + mb.width / 2, mb.y + mb.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(mb.x + mb.width / 2, mb.y + mb.height / 2 - 40, { steps: 3 });
-  await page.mouse.up();
+  // A coarse tap 12 cm beside the top straight, no drag: it should snap to that lane and take its direction.
+  const tap = await page.evaluate(() => {
+    const tr = window.__rrTrack, v = window.__rrMapView, d = devicePixelRatio, m = window.rr.S.mem;
+    let k = 0;
+    tr.forEach((q, i) => { if (Math.abs(q[0]) < 30 && q[1] > tr[k][1]) k = i; });
+    return { k, q: tr[k], d0: Math.hypot(tr[k][0] - m.x, tr[k][1] - m.y), px: ((tr[k][0] - v.x0) * v.sc) / d, py: ((v.y1 - tr[k][1] - 12) * v.sc) / d };
+  });
+  await page.mouse.click(mb.x + tap.px, mb.y + tap.py);
   await page.waitForFunction(() => window.rr.S.mem.userPlaced, null, { timeout: 2000 }).catch(() => {});
-  const placed = await page.evaluate(() => ({ placing: !!window.__rrPlacing, x: window.rr.S.mem.x, y: window.rr.S.mem.y, h: window.rr.S.mem.h, user: window.rr.S.mem.userPlaced, track: Array.isArray(window.__rrTrack), armed: window.rr.S.armed }));
-  check(!placed.placing && placed.user && placed.track && placed.armed && Math.hypot(placed.x - want[0], placed.y - want[1]) < 15 && Math.abs(placed.h - Math.PI / 2) < 0.3,
-    `touching the map places the car there without stopping Auto (${placed.x.toFixed(0)},${placed.y.toFixed(0)} vs ${want.map(Math.round)}, heading ${((placed.h * 180) / Math.PI).toFixed(0)}°, track ${placed.track})`);
+  const placed = await page.evaluate(() => { const m = window.rr.S.mem; return { placing: !!window.__rrPlacing, x: m.x, y: m.y, h: m.h, ti: m.ti, user: m.userPlaced, armed: window.rr.S.armed }; });
+  const dq = Math.hypot(placed.x - tap.q[0], placed.y - tap.q[1]);
+  check(!placed.placing && placed.user && placed.armed && dq < 0.25 * tap.d0 + 15 && Math.abs(Math.cos(placed.h)) > 0.8,
+    `a coarse tap on the map pulls the car onto that lane, along it, without stopping Auto (${dq.toFixed(0)} cm from the lane point, was ${tap.d0.toFixed(0)}; heading ${((placed.h * 180) / Math.PI).toFixed(0)}°)`);
   if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT });
   await page.evaluate(() => { window.__distHold = setInterval(() => { window.rr.S.tel.dist = 8; window.rr.S.tel.distAt = performance.now(); }, 5); });
   let back = { l: 0, r: 0 };

@@ -5,8 +5,10 @@
 // Position is dead reckoning from the wheel commands (VMAX, WHEELBASE below), so it drifts over minutes.
 // It assumes the car starts on the start straight heading right (as the gray track is drawn).
 // The map never takes your taps: buttons and pads under it keep working. To correct the car, tap 📍 (top left
-// of the map), then put your finger where the car really is and drag the way it faces, lift. A tap without a
-// drag keeps the heading. 👁 hides/shows the map. The first placement also moves everything mapped so far.
+// of the map), then tap roughly where the car is. That's a hint, not an order: it picks the spot on the gray lane
+// within TAP_CM of your finger that best fits where it thinks it is and which way it is heading (so it can tell
+// neighbouring meander strands apart), moves most of the way there and takes the lane's direction as heading.
+// 👁 hides/shows the map. The first hint also moves everything mapped so far.
 // It orients itself from your corrections: between two of them it compares how far it thought it drove with
 // the distance along the gray track, and learns a speed scale (kept for next time). And since it keeps to the
 // lane, it pulls its position back onto the gray lane and turns its heading toward the lane direction.
@@ -34,6 +36,8 @@ const LANE_HALF = 10;     // cm
 const LOST_CM = 45;       // farther than this from the gray lane = don't trust the match
 const SNAP_POS = 0.25;    // per tick, how much of the distance outside the lane to pull back
 const SNAP_HEAD = 0.03;   // per tick, how much to turn the heading toward the lane direction
+const TAP_CM = 45;        // how far off your finger may be
+const TAP_TRUST = 0.8;    // how far toward your hint it moves (1 = all the way)
 
 const base = Math.max(p.apBase, p.minSpeed + 5, 30);
 const gain = (p.apCurve ?? 10) / 100;
@@ -87,7 +91,7 @@ function nearest(x, y, around, win) {
 const tangent = (i) => { const a = track[i], b = track[(i + 1) % N]; return Math.atan2(b[1] - a[1], b[0] - a[0]); };
 
 // Move the car to a new pose. Until the user has placed it, everything mapped so far moves along with it.
-function place(x, y, h, why) {
+function place(x, y, h, why, idx) {
   const off = Math.hypot(x - mem.x, y - mem.y);
   const dh = h - mem.h;
   if (!mem.userPlaced) {
@@ -103,15 +107,16 @@ function place(x, y, h, why) {
     mem.cells = moved;
   }
   // Learn the speed scale: odometer since the last fix vs. the distance along the track between the two fixes.
-  const hit = track ? nearest(x, y, null, 0) : null;
-  if (why && hit && hit.d < LOST_CM && mem.fix && mem.odo > 60) {
+  const hit = !track ? null : idx !== undefined ? { i: idx, d: 0 } : nearest(x, y, null, 0);
+  // Hints are coarse, so only learn over a long stretch and only part of the way.
+  if (why && hit && hit.d < LOST_CM && mem.fix && mem.odo > 200) {
     const cum = window.__rrTrackCum, L = cum[N];
     let arc = mem.fix.dir > 0 ? cum[hit.i] - cum[mem.fix.i] : cum[mem.fix.i] - cum[hit.i];
     arc = ((arc % L) + L) % L;
     while (arc + L / 2 < mem.odo) arc += L; // it may have gone round more than once
     const ratio = arc / mem.odo;
     if (ratio > 0.4 && ratio < 2.5) {
-      mem.scale = Math.max(0.3, Math.min(3, mem.scale * ratio ** 0.7));
+      mem.scale = Math.max(0.3, Math.min(3, mem.scale * ratio ** 0.5));
       try { localStorage.setItem('rrExploreScale', String(mem.scale)); } catch (e) { /* no storage */ }
       ctx.log(`explore: drove ${Math.round(mem.odo)} cm by its count, ${Math.round(arc)} cm along the track → speed scale ${mem.scale.toFixed(2)}`);
     } else {
@@ -131,12 +136,37 @@ if (track && !mem.anchored) {
   mem.anchored = true;
   place(track[0][0], track[0][1], 0, null);
 }
+// A coarse "I'm about here" from the user's finger.
+function hint(x, y) {
+  if (!track) {
+    place(mem.x + (x - mem.x) * TAP_TRUST, mem.y + (y - mem.y) * TAP_TRUST, mem.h, 'hint (no track map)');
+    return;
+  }
+  // Score every lane point near the finger: distance to the finger, a little for distance to the current
+  // estimate, and a lot for pointing against the current heading (meander strands alternate direction).
+  let best = -1, bs = Infinity;
+  for (let i = 0; i < N; i++) {
+    const dTap = Math.hypot(track[i][0] - x, track[i][1] - y);
+    if (dTap > TAP_CM) continue;
+    const dEst = Math.min(300, Math.hypot(track[i][0] - mem.x, track[i][1] - mem.y));
+    const dir = mem.fix ? mem.fix.dir : 1;
+    const against = (1 - Math.cos(mem.h - tangent(i) - (dir < 0 ? Math.PI : 0))) / 2; // 0 = same way, 1 = opposite
+    const score = dTap + 0.15 * dEst + 40 * against;
+    if (score < bs) { bs = score; best = i; }
+  }
+  if (best < 0) {
+    ctx.log(`explore: no lane within ${TAP_CM} cm of your tap, ignored`);
+    return;
+  }
+  const q = track[best], tg = tangent(best);
+  const lane = Math.cos(mem.h - tg) >= 0 ? tg : tg + Math.PI;
+  place(mem.x + (q[0] - mem.x) * TAP_TRUST, mem.y + (q[1] - mem.y) * TAP_TRUST, mem.h + wrapA(lane - mem.h) * TAP_TRUST, 'took your hint', best);
+}
 if (web && window.__rrPlace) {
   const f = window.__rrPlace;
   window.__rrPlace = null;
-  place(f.x, f.y, f.h ?? mem.h, 'you placed the car');
+  hint(f.x, f.y);
   mem.userPlaced = true;
-  mem.trustUntil = s.t + 1500; // your placement wins over the track match for a moment
 }
 
 // ---- dead reckoning from what was actually sent to the motors during the last tick
@@ -151,7 +181,7 @@ mem.y += Math.sin(mem.h) * ((vl + vr) / 2) * (dt / 1000);
 mem.odo += Math.abs((vl + vr) / 2) * (dt / 1000);
 
 // ---- keep the estimate on the gray lane (the car is lane keeping, so that's where it really is)
-if (track && mem.ti !== null && (vl || vr) && s.t > (mem.trustUntil || 0)) {
+if (track && mem.ti !== null && (vl || vr)) {
   const m = nearest(mem.x, mem.y, mem.ti, 25); // stay near the last match so it can't jump to a neighbour strand
   if (m.d > LOST_CM) {
     if (!mem.lost) ctx.log(`explore: ${Math.round(m.d)} cm away from the track map, lost — tap 📍 and place me`);
@@ -303,7 +333,7 @@ if (web && s.t - mem.drawAt > 300) {
     btn('rrMapEye', '👁', 48, () => { window.__rrMapHidden = !window.__rrMapHidden; window.__rrPlacing = false; });
     box.insertBefore(cv, box.firstChild);
     document.body.appendChild(box);
-    // Finger down = where the car is, drag = which way it faces, lift = apply and stop placing.
+    // Finger down/slide = roughly where the car is, lift = send the hint and stop placing.
     const at = (e) => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr]; };
     cv.addEventListener('pointerdown', (e) => {
       if (!window.__rrPlacing) return;
@@ -316,9 +346,8 @@ if (web && s.t - mem.drawAt > 300) {
       const tc = window.__rrTouch, v = window.__rrMapView;
       window.__rrTouch = null;
       if (!tc || !v || e.type === 'pointercancel') return;
-      const [ax, ay] = tc.a, [bx, by] = tc.b;
-      const drag = Math.hypot(bx - ax, by - ay) > 15 * dpr;
-      window.__rrPlace = { x: v.x0 + ax / v.sc, y: v.y1 - ay / v.sc, h: drag ? Math.atan2(-(by - ay), bx - ax) : null };
+      const [bx, by] = tc.b;
+      window.__rrPlace = { x: v.x0 + bx / v.sc, y: v.y1 - by / v.sc };
       window.__rrPlacing = false;
     };
     cv.addEventListener('pointerup', end);
@@ -379,12 +408,15 @@ if (web && s.t - mem.drawAt > 300) {
   arrow(px(mem.x), py(mem.y), mem.h, '#3f3');
   const tc = window.__rrTouch;
   if (tc) {
-    const drag = Math.hypot(tc.b[0] - tc.a[0], tc.b[1] - tc.a[1]) > 15 * dpr;
-    arrow(tc.a[0], tc.a[1], drag ? Math.atan2(-(tc.b[1] - tc.a[1]), tc.b[0] - tc.a[0]) : mem.h, '#ff0');
+    g.strokeStyle = '#ff0';
+    g.lineWidth = 2 * dpr;
+    g.beginPath();
+    g.arc(tc.b[0], tc.b[1], TAP_CM * sc, 0, 2 * Math.PI);
+    g.stroke();
   }
   g.fillStyle = '#ccc';
   g.font = `${Math.round(12 * dpr)}px sans-serif`;
-  const status = placing ? 'touch where the car is, drag its heading' : track ? (mem.lost ? 'LOST — tap 📍 and place me' : 'on track') : 'no track map (New build)';
+  const status = placing ? 'tap roughly where the car is' : track ? (mem.lost ? 'LOST — tap 📍 and place me' : 'on track') : 'no track map (New build)';
   g.fillText(`${Math.round(runMs / 1000)}s  ${mem.obst} obst  ${mem.stuck} stuck  speed ×${mem.scale.toFixed(2)}  ${status}`, 96 * dpr, 16 * dpr);
 }
 return cmd;
