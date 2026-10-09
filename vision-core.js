@@ -1,8 +1,9 @@
-// Camera vision for the rally mat, used by the Vision tab (vision.js). No DOM: it runs in the browser and in Node (tools/smoke.mjs).
+// Camera vision for the rally mat, used by vision.html. No DOM: it runs in the browser and in Node (tools/smoke.mjs).
 // Input: one RGBA frame (w × h). Output: the lane mask, its centerline, the robot's position and where the robot sits
 // in the lane, all measured straight in the picture. That needs no map, so it works from whatever angle the phone sees.
 //   lane   = pink/purple/blue pixels, plus white pixels right next to them (the edge lines)
-//   drive  = lane with small gaps closed and enclosed holes filled (the robot sits in one of those holes)
+//   W      = lane width in px, fitted as a plane over the picture (far parts of the mat look smaller)
+//   drive  = lane with small gaps closed and enclosed robot-shaped holes filled (a robot on the lane makes one)
 //   robots = every dark blob on the lane ("drive but not lane"), each joined with green headlights next to it
 //            (the beacon: no green on the track, and it marks the front); or blobs of a color taught by tapping
 //   tracks = robots followed from frame to frame (nearest to where each was heading); select() picks "mine",
@@ -15,7 +16,8 @@ export const VDEFAULTS = {
   hueLo: 185, hueHi: 355,          // degrees: blue (≈220) → purple (≈280) → pink (≈330)
   satMin: 0.28, valMin: 0.3,       // colored lane pixels
   white: 1, whiteVal: 0.7, whiteSat: 0.25, // white edge lines count only next to colored lane
-  closeK: 0.35,                    // gap-closing radius, in lane widths
+  closeK: 0.15,                    // gap-closing radius, in lane widths (the real S-bend's gaps are only ~0.5 wide)
+  notchK: 0.4,                     // closing radius for robot-shaped notches at the lane edge, in lane widths
   robotMin: 0.05, robotMax: 1.5,   // robot blob area, in lane widths²
   robotSrc: 'auto',                // 'auto' = beacon if seen else hole, 'beacon' = green headlights,
                                    // 'hole' = dark gap in the lane, 'color' = color taught by tapping the robot
@@ -64,7 +66,9 @@ export class Vision {
     this.stack = new Int32Array(n);
     this.dt = new Uint16Array(n);
     this.I = new Int32Array((w + 1) * (h + 1));
-    this.W = Math.max(8, w / 10); // lane width in px, re-estimated every frame
+    this.rmap = new Uint8Array(n);
+    this.W = Math.max(8, w / 10); // median lane width in px, re-estimated every frame
+    this.Wp = [this.W, 0, 0];     // lane width at (x, y) = Wp[0] + Wp[1]·x + Wp[2]·y (perspective)
     this.reset();
   }
 
@@ -82,7 +86,7 @@ export class Vision {
   select(x, y) {
     let best = null, bd = Infinity;
     for (const tr of this.tracks) {
-      const [x0, y0, x1, y1] = tr.box, reach = Math.max(this.W, Math.hypot(x1 - x0, y1 - y0) / 2 + 0.3 * this.W);
+      const [x0, y0, x1, y1] = tr.box, Wl = this.Wat(tr.pos[0], tr.pos[1]), reach = Math.max(Wl, Math.hypot(x1 - x0, y1 - y0) / 2 + 0.3 * Wl);
       const d = Math.hypot(tr.pos[0] - x, tr.pos[1] - y);
       if (d < reach && d < bd) { bd = d; best = tr; }
     }
@@ -119,6 +123,12 @@ export class Vision {
     return this.color;
   }
 
+  // lane width in px at (x, y), from the plane fit, kept within reason
+  Wat(x, y) {
+    const [a, b, c] = this.Wp, v = a + b * x + c * y;
+    return Math.max(3, this.W * 0.25, Math.min(this.W * 4, v));
+  }
+
   // ---- binary image helpers (masks are Uint8Array of 0/1) ----
 
   integral(m) {
@@ -133,14 +143,15 @@ export class Vision {
   }
 
   // out = 1 where the (2r+1)² box around the pixel has any (dilate) or only (erode) set pixels; the box is clipped
-  // at the image border, so the outside counts as "don't know" instead of empty
+  // at the image border, so the outside counts as "don't know" instead of empty. r is a number or a per-pixel map.
   box(m, r, out, erode) {
-    const { w, h, I } = this, W1 = w + 1;
+    const { w, h, I } = this, W1 = w + 1, rm = typeof r === 'number' ? null : r;
     this.integral(m);
     for (let y = 0; y < h; y++) {
-      const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
       for (let x = 0; x < w; x++) {
-        const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+        const rr = rm ? rm[y * w + x] : r;
+        const y0 = Math.max(0, y - rr), y1 = Math.min(h, y + rr + 1);
+        const x0 = Math.max(0, x - rr), x1 = Math.min(w, x + rr + 1);
         const s = I[y1 * W1 + x1] - I[y0 * W1 + x1] - I[y1 * W1 + x0] + I[y0 * W1 + x0];
         out[y * w + x] = erode ? (s === (x1 - x0) * (y1 - y0) ? 1 : 0) : s > 0 ? 1 : 0;
       }
@@ -299,32 +310,59 @@ export class Vision {
     let laneN = 0;
     for (let i = 0; i < n; i++) { lane[i] = keep[this.labels[i]]; laneN += lane[i]; }
 
-    // 3b. lane width = 2 × median distance-to-edge along the centerline of the lane itself (not of `drive`: where strands
-    //     run side by side with a thin gap, closing merges them and the width would read far too big)
-    this.thin(lane);
-    this.distance(lane);
-    const ds = [];
-    for (let i = 0; i < n; i++) if (this.skel[i] && this.dt[i] < 65000) ds.push(this.dt[i]);
-    if (ds.length > 10) {
-      ds.sort((a, b) => a - b);
-      const Wm = (2 * ds[ds.length >> 1]) / 3 + 1;
-      this.W += (Math.max(4, Math.min(w / 2, Wm)) - this.W) * 0.5;
-    }
-
-    // 4. drive = lane closed with a radius tied to the lane width, plus enclosed holes up to robot size
-    const rc = Math.max(1, Math.round(p.closeK * this.W));
-    this.box(lane, rc, tmp, false);
-    this.box(tmp, rc, drive, true);
-    for (let i = 0; i < n; i++) tmp[i] = drive[i] ? 0 : 1;
-    const holeMax = p.robotMax * this.W * this.W;
+    // 4. drive = lane with small gaps closed (radius tied to the local lane width), plus notches and enclosed holes
+    //    shaped like a robot (compact, robot-sized): the long thin gaps between the S-bend's strands stay open
+    const { rmap } = this;
+    const robotShaped = (c, Wl, minA) => {
+      const bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1;
+      return c.area >= minA && c.area <= p.robotMax * Wl * Wl && Math.max(bw, bh) <= 1.5 * Wl &&
+        Math.min(bw, bh) >= Math.max(2, 0.2 * Wl) && Math.max(bw, bh) <= 3 * Math.min(bw, bh) && c.area >= 0.3 * bw * bh;
+    };
+    for (let y = 0, i = 0; y < h; y++) for (let x = 0; x < w; x++, i++) rmap[i] = Math.max(1, Math.round(p.notchK * this.Wat(x, y)));
+    this.box(lane, rmap, tmp, false);
+    this.box(tmp, rmap, tmp2, true); // tmp2 = closed with the big radius
+    for (let y = 0, i = 0; y < h; y++) for (let x = 0; x < w; x++, i++) rmap[i] = Math.max(1, Math.round(p.closeK * this.Wat(x, y)));
+    this.box(lane, rmap, tmp, false);
+    this.box(tmp, rmap, drive, true);
+    for (let i = 0; i < n; i++) tmp[i] = tmp2[i] & (drive[i] ^ 1); // what only the big closing adds
     comps = this.components(tmp);
-    const fill = new Uint8Array(comps.length + 1);
-    for (const c of comps) fill[c.id] = !c.border && c.area <= holeMax ? 1 : 0;
+    let fill = new Uint8Array(comps.length + 1);
+    for (const c of comps) fill[c.id] = !c.border && robotShaped(c, this.Wat(c.cx, c.cy), 0) ? 1 : 0;
+    for (let i = 0; i < n; i++) if (tmp[i] && fill[this.labels[i]]) drive[i] = 1;
+    for (let i = 0; i < n; i++) tmp[i] = drive[i] ? 0 : 1;
+    comps = this.components(tmp);
+    fill = new Uint8Array(comps.length + 1);
+    for (const c of comps) fill[c.id] = !c.border && robotShaped(c, this.Wat(c.cx, c.cy), 0) ? 1 : 0;
     for (let i = 0; i < n; i++) if (tmp[i] && fill[this.labels[i]]) drive[i] = 1;
 
-    // 5. centerline of drive
+    // 5. centerline, and lane width = 2 × distance to the edge along it: the median, and a plane over the picture
     this.thin(drive);
     this.distance(drive);
+    const ds = [], sx = [], sy = [];
+    const mg = Math.max(2, Math.round(this.W / 2));
+    for (let y = mg; y < h - mg; y++) {
+      for (let x = mg; x < w - mg; x++) {
+        const i = y * w + x;
+        if (this.skel[i] && this.dt[i] < 65000) { ds.push((2 * this.dt[i]) / 3 + 1); sx.push(x); sy.push(y); }
+      }
+    }
+    if (ds.length > 10) {
+      const sorted = [...ds].sort((a, b) => a - b), Wm = Math.max(4, Math.min(w / 2, sorted[sorted.length >> 1]));
+      this.W += (Wm - this.W) * 0.5;
+      let fit = [Wm, 0, 0];
+      if (ds.length >= 30) {
+        // least squares W = a + b·x + c·y over the centerline (skipping outliers such as junctions)
+        const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], B = [0, 0, 0];
+        for (let k = 0; k < ds.length; k++) {
+          if (ds[k] > 2.5 * Wm || ds[k] < 0.3 * Wm) continue;
+          const v = [1, sx[k], sy[k]];
+          for (let r = 0; r < 3; r++) { B[r] += v[r] * ds[k]; for (let q = 0; q < 3; q++) A[r][q] += v[r] * v[q]; }
+        }
+        const sol = solve3(A, B);
+        if (sol) fit = sol;
+      }
+      this.Wp = this.Wp.map((v, k) => v + (fit[k] - v) * 0.5);
+    }
     const W = this.W;
 
     // 6. robot detections: holes in the lane (or the taught color), each joined with a beacon next to it
@@ -339,20 +377,33 @@ export class Vision {
     } else {
       for (let i = 0; i < n; i++) cand[i] = drive[i] & (lane[i] ^ 1);
     }
-    const aMin = p.robotMin * W * W, aMax = p.robotMax * W * W;
     // robots are compact blobs; thin slivers along the lane edge are left over from gap closing
-    const thick = Math.max(2, 0.2 * W);
-    const holes = this.components(cand).filter((c) => c.area >= (colorMode ? 4 : aMin) && c.area <= aMax &&
-      (colorMode || (Math.min(c.x1 - c.x0, c.y1 - c.y0) + 1 >= thick && c.area >= 0.3 * (c.x1 - c.x0 + 1) * (c.y1 - c.y0 + 1) &&
-        Math.max(c.x1 - c.x0, c.y1 - c.y0) + 1 <= 3 * (Math.min(c.x1 - c.x0, c.y1 - c.y0) + 1))));
+    const holes = this.components(cand).filter((c) => {
+      const Wl = this.Wat(c.cx, c.cy);
+      return colorMode ? c.area >= 4 && c.area <= p.robotMax * Wl * Wl : robotShaped(c, Wl, p.robotMin * Wl * Wl);
+    });
     let beacons = [];
     if (useBeacon) {
-      this.box(bea, Math.max(1, Math.round(W * 0.15)), tmp, false); // the two headlights merge into one blob
-      beacons = this.components(tmp).filter((c) => c.area >= 6 && c.area <= aMax);
+      // the two headlights merge into one blob; green far from the lane (a cushion, a shirt) is not a robot
+      this.box(bea, Math.max(1, Math.round(W * 0.15)), tmp, false);
+      this.box(drive, Math.max(1, Math.round(W * 0.8)), tmp2, false);
+      const raw = this.components(tmp).filter((c) => c.area >= 6 && c.area <= p.robotMax * this.Wat(c.cx, c.cy) ** 2 &&
+        tmp2[Math.round(c.cy) * w + Math.round(c.cx)]);
+      // one robot's two headlights can still come out as two blobs: merge blobs closer than 0.8 lane widths
+      for (const c of raw) {
+        const q = beacons.find((b) => Math.hypot(b.cx - c.cx, b.cy - c.cy) < 0.8 * this.Wat(c.cx, c.cy));
+        if (!q) { beacons.push({ ...c }); continue; }
+        const a = q.area + c.area;
+        q.cx = (q.cx * q.area + c.cx * c.area) / a;
+        q.cy = (q.cy * q.area + c.cy * c.area) / a;
+        q.area = a;
+        q.x0 = Math.min(q.x0, c.x0); q.y0 = Math.min(q.y0, c.y0); q.x1 = Math.max(q.x1, c.x1); q.y1 = Math.max(q.y1, c.y1);
+      }
     }
     const dets = [], used = new Set();
     for (const b of beacons) {
-      let body = null, bd = 1.2 * W;
+      const Wl = this.Wat(b.cx, b.cy);
+      let body = null, bd = 1.2 * Wl;
       for (const c of holes) {
         const d = Math.hypot(c.cx - b.cx, c.cy - b.cy);
         if (!used.has(c) && d < bd) { bd = d; body = c; }
@@ -360,7 +411,7 @@ export class Vision {
       if (body) used.add(body);
       const o = body || b;
       dets.push({ x: o.cx, y: o.cy, box: [Math.min(o.x0, b.x0), Math.min(o.y0, b.y0), Math.max(o.x1, b.x1), Math.max(o.y1, b.y1)], beacon: true, border: false,
-        hd: body && bd > 0.08 * W ? [(b.cx - body.cx) / bd, (b.cy - body.cy) / bd] : null });
+        hd: body && bd > 0.08 * Wl ? [(b.cx - body.cx) / bd, (b.cy - body.cy) / bd] : null });
     }
     if (p.robotSrc !== 'beacon') {
       for (const c of holes) if (!used.has(c)) dets.push({ x: c.cx, y: c.cy, box: [c.x0, c.y0, c.x1, c.y1], beacon: !!colorMode, border: c.border, hd: null });
@@ -372,14 +423,17 @@ export class Vision {
     const pairs = [];
     for (const tr of this.tracks) {
       tr.pred = [tr.pos[0] + tr.vel[0] * dt, tr.pos[1] + tr.vel[1] * dt];
-      const gate = Math.min(4 * W, Math.max(1.2 * W, 2 * Math.hypot(...tr.vel) * dt) * (1 + 0.3 * tr.missed));
+      const Wl = this.Wat(tr.pred[0], tr.pred[1]);
+      const gate = Math.min(4 * Wl, Math.max(1.2 * Wl, 2 * Math.hypot(...tr.vel) * dt) * (1 + 0.3 * tr.missed));
       dets.forEach((d, k) => {
         const dist = Math.hypot(d.x - tr.pred[0], d.y - tr.pred[1]);
-        if (dist <= gate) pairs.push([dist - (d.beacon && tr.beacon > 0 ? 0.5 * W : 0), tr, k]);
+        // my beacon robot gets first pick of beacon detections
+        const bonus = d.beacon && tr.id === this.mine && this.mineBeacon ? 2 * Wl : d.beacon && tr.beacon > 0 ? 0.5 * Wl : 0;
+        if (dist <= gate) pairs.push([dist - bonus, tr, k]);
       });
     }
     pairs.sort((a, b) => a[0] - b[0]);
-    const tMatched = new Set(), dMatched = new Set();
+    const tMatched = new Set(), dMatched = new Set(), owner = new Map();
     const take = (tr, d) => {
       const k = Math.min(1, dt / 0.25);
       if (tr.age > 1 && !tr.missed) {
@@ -396,17 +450,24 @@ export class Vision {
     for (const [, tr, k] of pairs) {
       if (tMatched.has(tr) || dMatched.has(k)) continue;
       dMatched.add(k);
+      owner.set(k, tr);
       take(tr, dets[k]);
     }
     let mineTr = this.tracks.find((tr) => tr.id === this.mine) || null;
-    // my robot shows the beacon: if its track lost it, the beacon robot is still mine
-    const beaconDet = dets.findIndex((d, k) => d.beacon && !dMatched.has(k));
+    // my robot shows the beacon: if its track lost it, the beacon robot is still mine (even if another track took it)
+    let beaconDet = -1, bdist = Infinity;
+    dets.forEach((d, k) => {
+      const dd = mineTr ? Math.hypot(d.x - mineTr.pred[0], d.y - mineTr.pred[1]) : 0;
+      if (d.beacon && dd < bdist) { bdist = dd; beaconDet = k; }
+    });
     if (beaconDet >= 0 && (mineTr ? !tMatched.has(mineTr) && this.mineBeacon : this.mineBeacon || !this.picked)) {
       if (!mineTr) {
         mineTr = { id: this.nextId++, pos: [0, 0], vel: [0, 0], box: null, age: 1, missed: 0, beacon: 0, hd: null };
         this.tracks.push(mineTr);
         this.mine = mineTr.id;
       }
+      const other = owner.get(beaconDet);
+      if (other) { tMatched.delete(other); this.tracks = this.tracks.filter((tr) => tr !== other); }
       dMatched.add(beaconDet);
       take(mineTr, dets[beaconDet]);
       mineTr.vel = [0, 0]; // jumped: no speed from that
@@ -419,8 +480,12 @@ export class Vision {
       tr.vel = [tr.vel[0] * 0.7, tr.vel[1] * 0.7];
       tr.beacon = Math.max(0, tr.beacon - 1);
     }
-    // forget tracks not seen for a while (mine is kept longer, it may come back into view)
+    // forget tracks not seen for a while (mine is kept longer, it may come back into view), and duplicates:
+    // two tracks on the same spot keep the one that is mine, else the older one
     this.tracks = this.tracks.filter((tr) => (tr.id === this.mine ? tr.missed <= 45 : tr.missed <= 8 && (tr.age > 2 || !tr.missed)));
+    this.tracks.sort((a, b) => (b.id === this.mine) - (a.id === this.mine) || a.missed - b.missed || b.age - a.age);
+    this.tracks = this.tracks.filter((tr, i) => !this.tracks.slice(0, i).some((o) =>
+      Math.hypot(o.pos[0] - tr.pos[0], o.pos[1] - tr.pos[1]) < 0.5 * this.Wat(tr.pos[0], tr.pos[1])));
     dets.forEach((d, k) => {
       if (dMatched.has(k) || d.border) return; // a blob cut by the picture's edge only continues a track
       this.tracks.push({ id: this.nextId++, pos: [d.x, d.y], vel: [0, 0], box: d.box, age: 1, missed: 0, beacon: d.beacon ? 30 : 0, hd: d.hd });
@@ -431,12 +496,13 @@ export class Vision {
 
     // 8. pose of my robot in the lane
     const out = {
-      W, laneFrac: laneN / n, dets, mine: this.mine,
+      W, Wp: [...this.Wp], laneFrac: laneN / n, dets, mine: this.mine,
       tracks: this.tracks.filter((tr) => tr.age >= 3 || tr.id === this.mine).map((tr) => ({ id: tr.id, x: tr.pos[0], y: tr.pos[1], box: tr.box, missed: tr.missed, beacon: tr.beacon > 0, mine: tr.id === this.mine })),
       robot: mineTr ? [...mineTr.pos] : null, found: !!mineTr && !mineTr.missed, lost: mineTr ? mineTr.missed : null,
     };
     if (out.robot) {
-      const [x, y] = out.robot;
+      const [x, y] = out.robot, W = this.Wat(x, y);
+      out.Wr = W;
       // lane direction from the centerline near the robot (principal axis)
       let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, k = 0;
       const R = Math.ceil(W), x0 = Math.max(0, Math.round(x) - R), x1 = Math.min(w - 1, Math.round(x) + R);
@@ -527,4 +593,21 @@ export function contour(m, w, h) {
     }
   }
   return seg;
+}
+
+// solves the 3×3 system A·x = b (Gaussian elimination); null if it is (nearly) singular
+function solve3(A, b) {
+  const M = A.map((row, i) => [...row, b[i]]);
+  for (let c = 0; c < 3; c++) {
+    let piv = c;
+    for (let r = c + 1; r < 3; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+    if (Math.abs(M[piv][c]) < 1e-9 * (Math.abs(M[0][0]) + 1)) return null;
+    [M[c], M[piv]] = [M[piv], M[c]];
+    for (let r = 0; r < 3; r++) {
+      if (r === c) continue;
+      const f = M[r][c] / M[c][c];
+      for (let q = c; q < 4; q++) M[r][q] -= f * M[c][q];
+    }
+  }
+  return [M[0][3] / M[0][0], M[1][3] / M[1][1], M[2][3] / M[2][2]];
 }

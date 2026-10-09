@@ -30,6 +30,8 @@
         <div class="kv"><span>Line Hz</span><b id="vHz">–</b></div>
         <div class="kv"><span>Accel</span><b id="vAccel">–</b></div>
         <div class="kv"><span>Light·°C</span><b id="vEnv">–</b></div>
+        <div class="kv"><span>Camera</span><b id="vCam">–</b></div>
+        <div class="kv"><span>Lane</span><b id="vLane">–</b></div>
       </div>
       <div class="lap">
         <b id="lapTime">0.00</b>
@@ -59,6 +61,9 @@
       <code>s.L</code>/<code>s.R</code> mean "this sensor is on the line" (after the Invert setting), <code>s.code</code> is the raw 0–3 value,
       <code>s.dt</code> is ms since the last reading, <code>s.dist</code> is the last distance in cm, <code>p</code> holds the Tune values, and
       <code>mem</code> persists until you press GO again. Apply hot-swaps the code and keeps the connection.
+      With a camera feed (Tune → Vision), <code>s.vis</code> has the car's pose predicted to when the command lands,
+      <code>e</code> (cm left of the lane center), <code>ahead</code> (lane center point ahead, [forward, left] cm),
+      <code>kAhead</code> (sharpest bend ahead, 1/cm) and <code>fresh</code>; it is <code>null</code> without a feed.
     </p>
     <textarea id="apCode" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
     <h3>Sensor history <span class="muted small">(newest on the right · top = left sensor)</span></h3>

@@ -144,7 +144,7 @@ export function score(res, gt, drive) {
   for (let i = 0; i < gt.lane.length; i++) { const a = drive[i], b = gt.lane[i]; inter += a & b; uni += a | b; }
   const out = { iou: uni ? inter / uni : 1 };
   if (gt.robot) {
-    out.err = res.robot ? Math.hypot(res.robot[0] - gt.robot[0], res.robot[1] - gt.robot[1]) / res.W : Infinity;
+    out.err = res.robot ? Math.hypot(res.robot[0] - gt.robot[0], res.robot[1] - gt.robot[1]) / (res.Wr || res.W) : Infinity;
     out.ok = out.err < 0.5; // the track marked mine is on my robot
     if (res.offset != null && Math.abs(gt.offset) > 0.3) out.sideOk = Math.sign(res.offset) === Math.sign(gt.offset);
     if (res.heading && gt.heading) out.headOk = res.heading[0] * gt.heading[0] + res.heading[1] * gt.heading[1] > 0.7;

@@ -76,8 +76,11 @@ export class LinkModel {
   }
 }
 
+// The lane center line as { center: [[x, y], ...] cm in driving order, width cm }, for the fake camera.
+export function trackCenter() { return { center: RALLY, width: 2 * RALLY_HALF }; }
+
 export class SimCar {
-  // opts() returns { vmax }, read live.
+  // opts() returns { vmax, skew }, read live.
   constructor(opts = () => ({})) {
     this.opts = opts;
     this.time = 0;
@@ -109,9 +112,10 @@ export class SimCar {
   }
 
   step(dt) {
+    const skew = (this.opts().skew || 0) / 100; // + = right wheel stronger (the car drifts left)
     const k = 1 - Math.exp(-dt / MOTOR_TAU);
-    this.vl += (this.wheel(this.l) - this.vl) * k;
-    this.vr += (this.wheel(this.r) - this.vr) * k;
+    this.vl += (this.wheel(this.l) * (1 - skew) - this.vl) * k;
+    this.vr += (this.wheel(this.r) * (1 + skew) - this.vr) * k;
     this.v = (this.vl + this.vr) / 2;
     this.w = (this.vr - this.vl) / WHEELBASE;
     if (Math.abs(this.v * this.w) > GRIP_AY) this.w = Math.sign(this.w) * GRIP_AY / Math.abs(this.v); // slides wide
