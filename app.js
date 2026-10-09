@@ -574,16 +574,25 @@ function fxTick(t) {
   const [l, r] = S.out;
   const avg = (l + r) / 2;
   if (avg < S.fxPrevAvg - 12 || (S.fxPrevAvg > 20 && Math.abs(avg) < 1)) S.brakeUntil = t + 400;
+  if (avg > S.fxPrevAvg + 6) S.accelUntil = t + 300;
   S.fxPrevAvg = avg;
   const big = Math.max(Math.abs(l), Math.abs(r), 1);
   const steer = S.mode === 'manual' ? S.steer : (l - r) / big;
   const blinkOn = Math.floor(t / p.blinkMs) % 2 === 0;
   const hb = p.headlight;
   const white = `${hb},${hb},${hb}`;
+  // Left/right are swapped on the robot's headlight LEDs: turning right must blink the right one.
+  const turning = Math.abs(steer) > p.signalAt;
+  // Underglow shows intent: red = braking/reversing, green = accelerating,
+  // amber pulse in time with the indicator = turning, else the speed gradient.
+  let ug = speedColor(Math.abs(avg));
+  if (avg < -1 || t < S.brakeUntil) ug = '255,0,0';
+  else if (t < (S.accelUntil || 0)) ug = '0,255,70';
+  else if (turning && Math.abs(avg) > 1) ug = blinkOn ? AMBER : ug;
   const want = {
-    HLL: steer < -p.signalAt ? (blinkOn ? AMBER : OFF) : white,
-    HLR: steer > p.signalAt ? (blinkOn ? AMBER : OFF) : white,
-    UG: avg < -1 || t < S.brakeUntil ? '255,0,0' : speedColor(Math.abs(avg)),
+    HLL: steer > p.signalAt ? (blinkOn ? AMBER : OFF) : white,
+    HLR: steer < -p.signalAt ? (blinkOn ? AMBER : OFF) : white,
+    UG: ug,
   };
   for (const k of ['HLL', 'HLR', 'UG']) {
     if (S.fx[k] === want[k]) continue;
