@@ -262,6 +262,31 @@ try {
   await page2.waitForTimeout(100);
   check(await page2.evaluate(() => window.__ble.got.includes('S')), 'sends S when the app goes to background');
   await page2.close();
+
+  // 3. Camera vision (vision.html): the pipeline against the synthetic camera's ground truth, then the page itself
+  const { Vision, VDEFAULTS } = await import('../vision-core.js');
+  const { SynthCam, score } = await import('../vision-synth.js');
+  for (const [cam, beacon] of [['follow', true], ['high', true], ['side', true], ['follow', false], ['side', false]]) {
+    const vw = 240, vh = 180, sc = new SynthCam(vw, vh, { cam, beacon }), vis = new Vision(vw, vh), buf = new Uint8ClampedArray(vw * vh * 4);
+    let n = 0, ok = 0, iou = 0, side = 0, sideN = 0, head = 0, headN = 0;
+    for (let k = 0; k < 150; k++) {
+      const gt = sc.render(k * 0.1, buf), s = score(vis.process(buf, k * 100, VDEFAULTS), gt, vis.drive);
+      n++; iou += s.iou;
+      if (gt.robot) ok += s.ok ? 1 : 0;
+      if (s.sideOk != null) { sideN++; side += s.sideOk; }
+      if (s.headOk != null) { headN++; head += s.headOk; }
+    }
+    const tag = `${cam} camera, ${beacon ? 'green beacon' : 'dark gap'}`;
+    check(ok >= n * 0.97 && iou / n > 0.9, `vision tracks the robot (${ok}/${n} within ½ lane width) and lane (IoU ${(iou / n).toFixed(3)}), ${tag}`);
+    check(side >= sideN * 0.9 && head >= headN * 0.85, `vision offset side ${side}/${sideN} and heading ${head}/${headN} right, ${tag}`);
+  }
+  const page3 = await ctx.newPage();
+  page3.on('pageerror', (e) => errors.push(e.message));
+  await page3.goto(BASE + 'vision.html?demo');
+  await page3.waitForFunction(() => window.rv?.stats.n > 30, null, { timeout: 15000 }).catch(() => {});
+  const vs = await page3.evaluate(() => ({ ...window.rv.stats, found: window.rv.res?.found }));
+  check(vs.n > 30 && vs.ok >= vs.vis * 0.95 && vs.found, `vision page runs the demo and tracks the robot (${vs.ok}/${vs.vis} frames)`);
+  await page3.close();
 } finally {
   await browser.close();
   server.close();

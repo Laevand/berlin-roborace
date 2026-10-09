@@ -54,4 +54,5 @@ To try it without a robot, add `?demo` to the URL. That gives you a simulated ca
 | `app.js` | BLE link, command queue, control loop, inputs, lights, telemetry, autopilot engine, Tune form. |
 | `sim.js` | Demo simulator, a fake robot speaking the same protocol. |
 | `autopilot/*.js` | Autopilot scripts, listed in `autopilot/index.json`. |
+| `vision.html`, `vision*.js` | Experimental camera page: finds the lane and the robot in the phone camera. `vision.html?demo` scores it against a synthetic camera. Not used for driving yet. |
 | `tools/smoke.mjs` | Headless test. Run `node tools/smoke.mjs` before pushing. |

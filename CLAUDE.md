@@ -30,6 +30,9 @@ Win the Next App Robot Rally ([CONTEST.md](https://github.com/droidconHQ/CuteBot
 ## Simulator
 `?demo` → Tune → Demo has track `rally` (20 cm lane, the mat traced from the floor photo: top/bottom straights, right loop, five-strand vertical meander, motor lag, grip limit, lap timer on the canvas) and link `varying` (delay jumps +350 ms at random). The shape and `VMAX` (50 cm/s) are placeholders: calibrate from booth measurements (lane width 20 cm is real). `node tools/simrun.mjs --secs=180 --latency=70,200 --link=steady,varying --apBase=40,50,60` runs `autopilot/lane.js` headless over a parameter grid (any `--apXxx=a,b` is a param).
 
+## Vision (experimental, not in the control loop)
+`vision.html` is a standalone camera debug page; the driving app doesn't load it. `vision-core.js` finds the lane by color (hue 185–355 plus the white edges next to it), the robot (green headlights = beacon, else a dark gap in the lane) and the robot's offset in the lane, free lane ahead and a steer direction, all in image space, so it needs no map and works from any angle. `vision.html?demo` runs it on `vision-synth.js` (the rally track through a walking phone camera, with ground truth) and scores it. smoke.mjs checks it on three camera angles. Next step: confirm on the real mat with the tap inspector, then feed offset/steer into the control loop (needs camera access in Bluefy, which is untested).
+
 ## Working with the user
 They are at the booth with only a phone. Keep replies short. For each change, say exactly what to tap: "Pull from repo" for `autopilot/` changes (keeps the connection), or "⬆ New build" then Connect for app changes. Ask for Log tab or dashboard screenshots as data, and prefer adding a Tune slider over another push.
 
