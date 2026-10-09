@@ -49,9 +49,11 @@ export const CAMS = {
 };
 
 export class SynthCam {
-  // beacon: headlights green (what vision mode sets on the real car) instead of white
-  constructor(w, h, { cam = 'follow', speed = 35, fov = 63, seed = 1, beacon = true } = {}) {
+  // beacon: my robot's headlights are green (what vision mode sets on the real car) instead of white.
+  // others: more robots on the lane (white headlights), ahead of and behind mine, at the same speed.
+  constructor(w, h, { cam = 'follow', speed = 35, fov = 63, seed = 1, beacon = true, others = 2 } = {}) {
     Object.assign(this, { w, h, cam, speed, F: w / 2 / Math.tan((fov * Math.PI) / 360), seed, beacon });
+    this.cars = [{ s0: 0, wob: 5, ph: 0, beacon }, { s0: 75, wob: 4, ph: 2 }, { s0: -90, wob: 3, ph: 4 }, { s0: 170, wob: 4, ph: 1 }].slice(0, 1 + others);
   }
 
   rand() { // mulberry32, deterministic noise
@@ -61,9 +63,9 @@ export class SynthCam {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
 
-  robotAt(t) {
-    const s = this.speed * t, off = 5 * Math.sin(0.9 * t); // cm left of the centerline
-    const c = along(s), c2 = along(s + 1), d = 5 * 0.9 * Math.cos(0.9 * t) / this.speed;
+  robotAt(t, car = this.cars[0]) {
+    const s = car.s0 + this.speed * t, off = car.wob * Math.sin(0.9 * t + car.ph); // cm left of the centerline
+    const c = along(s), c2 = along(s + 1), d = car.wob * 0.9 * Math.cos(0.9 * t + car.ph) / this.speed;
     const th = Math.atan2(c.ty, c.tx) + Math.atan(d);
     return { x: c.x - c.ty * off, y: c.y + c.tx * off, th, off, tx: c2.tx, ty: c2.ty };
   }
@@ -88,8 +90,9 @@ export class SynthCam {
 
   // renders frame t (seconds) into out (RGBA); returns ground truth
   render(t, out) {
-    const { w, h, F } = this, rob = this.robotAt(t), c = this.cameraAt(t, rob);
-    const cs = Math.cos(rob.th), sn = Math.sin(rob.th);
+    const { w, h, F } = this, robs = this.cars.map((car) => ({ ...this.robotAt(t, car), beacon: car.beacon }));
+    const rob = robs[0], c = this.cameraAt(t, rob);
+    for (const r of robs) { r.cs = Math.cos(r.th); r.sn = Math.sin(r.th); }
     const lane = new Uint8Array(w * h);
     for (let py = 0; py < h; py++) {
       for (let px = 0; px < w; px++) {
@@ -99,12 +102,16 @@ export class SynthCam {
         if (rz > -1e-6) col = [70, 72, 80]; // wall
         else {
           const tt = -c.pos[2] / rz, X = c.pos[0] + tt * rx, Y = c.pos[1] + tt * ry;
-          const dx = X - rob.x, dy = Y - rob.y, a = dx * cs + dy * sn, b = -dx * sn + dy * cs;
+          let a = 99, b = 99, car = null;
+          for (const r of robs) {
+            const dx = X - r.x, dy = Y - r.y, ra = dx * r.cs + dy * r.sn, rb = -dx * r.sn + dy * r.cs;
+            if (Math.abs(ra) <= 5 && Math.abs(rb) <= 4.5) { a = ra; b = rb; car = r; break; }
+          }
           const gx = Math.floor(X - bx0), gy = Math.floor(Y - by0);
           const inMat = gx >= 0 && gy >= 0 && gx < GW && gy < GH;
           const d = inMat ? GD[gy * GW + gx] : 99;
-          if (Math.abs(a) <= 5 && Math.abs(b) <= 4.5) {
-            col = a > 3.8 && Math.abs(b) > 2.6 ? (this.beacon ? [80, 245, 120] : [255, 235, 190]) : Math.abs(b) > 3.6 && Math.abs(a) < 2.5 ? [12, 12, 12] : Math.abs(a) < 2 && Math.abs(b) < 2.2 ? [45, 50, 45] : [28, 28, 32];
+          if (car) {
+            col = a > 3.8 && Math.abs(b) > 2.6 ? (car.beacon ? [80, 245, 120] : [255, 235, 190]) : Math.abs(b) > 3.6 && Math.abs(a) < 2.5 ? [12, 12, 12] : Math.abs(a) < 2 && Math.abs(b) < 2.2 ? [45, 50, 45] : [28, 28, 32];
             if (d <= HALF) lane[py * w + px] = 1;
           } else if (!inMat) col = [150, 140, 125]; // booth floor
           else if (d <= HALF - EDGE) { col = laneColor(GU[gy * GW + gx]); lane[py * w + px] = 1; }
@@ -116,11 +123,12 @@ export class SynthCam {
         out[j + 3] = 255;
       }
     }
-    const p0 = this.project(c, rob.x, rob.y), p1 = this.project(c, rob.x + 5 * cs, rob.y + 5 * sn);
+    const inPic = (q) => q && q[0] >= 0 && q[1] >= 0 && q[0] < w && q[1] < h;
+    const others = robs.slice(1).map((r) => this.project(c, r.x, r.y)).filter(inPic);
+    const p0 = this.project(c, rob.x, rob.y), p1 = this.project(c, rob.x + 5 * rob.cs, rob.y + 5 * rob.sn);
     let heading = null;
     if (p0 && p1) { const l = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) || 1; heading = [(p1[0] - p0[0]) / l, (p1[1] - p0[1]) / l]; }
-    const inView = p0 && p0[0] >= 0 && p0[1] >= 0 && p0[0] < w && p0[1] < h;
-    return { robot: inView ? p0 : null, heading, offset: -rob.off / HALF, lane };
+    return { robot: inPic(p0) ? p0 : null, others, heading, offset: -rob.off / HALF, lane };
   }
 }
 
@@ -137,9 +145,17 @@ export function score(res, gt, drive) {
   const out = { iou: uni ? inter / uni : 1 };
   if (gt.robot) {
     out.err = res.robot ? Math.hypot(res.robot[0] - gt.robot[0], res.robot[1] - gt.robot[1]) / res.W : Infinity;
-    out.ok = out.err < 0.5;
+    out.ok = out.err < 0.5; // the track marked mine is on my robot
     if (res.offset != null && Math.abs(gt.offset) > 0.3) out.sideOk = Math.sign(res.offset) === Math.sign(gt.offset);
     if (res.heading && gt.heading) out.headOk = res.heading[0] * gt.heading[0] + res.heading[1] * gt.heading[1] > 0.7;
+  }
+  // every robot in view has a box on it
+  out.seen = 0;
+  out.all = 0;
+  for (const q of [gt.robot, ...(gt.others || [])]) {
+    if (!q) continue;
+    out.all++;
+    if (res.tracks.some((tr) => Math.hypot(tr.x - q[0], tr.y - q[1]) < 0.5 * res.W)) out.seen++;
   }
   return out;
 }
