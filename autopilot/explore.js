@@ -4,9 +4,13 @@
 //   red = something the distance sensor saw ahead (cone, wall), brighter = seen more often, green = the car.
 // Position is dead reckoning from the wheel commands (VMAX, WHEELBASE below), so it drifts over minutes.
 // It assumes the car starts on the start straight heading right (as the gray track is drawn).
-// Put your finger on the map where the car really is and drag the way it faces, then lift: it jumps there
-// and the Log says how far off it was. A tap without a drag keeps the heading. The first placement also
-// moves everything mapped so far; later ones only fix the car.
+// The map never takes your taps: buttons and pads under it keep working. To correct the car, tap 📍 (top left
+// of the map), then put your finger where the car really is and drag the way it faces, lift. A tap without a
+// drag keeps the heading. 👁 hides/shows the map. The first placement also moves everything mapped so far.
+// It orients itself from your corrections: between two of them it compares how far it thought it drove with
+// the distance along the gray track, and learns a speed scale (kept for next time). And since it keeps to the
+// lane, it pulls its position back onto the gray lane and turns its heading toward the lane direction.
+// If it is more than LOST_CM from the lane it stops doing that and shows "lost" until you place it.
 //
 // It reads ?DIST itself every DIST_MS (only if "Read distance every N" is 0), so leave "Stop for obstacle" at 0.
 // Something closer than NEAR_CM ahead, or no progress for STUCK_MS (distance and line sensors both frozen
@@ -26,6 +30,10 @@ const GIVE_UP_MS = 2500;
 const MAX_RETRIES = 3;
 const MAX_RUN_MS = 12 * 60 * 1000;
 const BACK_MS = 600, TURN_MS = 450;
+const LANE_HALF = 10;     // cm
+const LOST_CM = 45;       // farther than this from the gray lane = don't trust the match
+const SNAP_POS = 0.25;    // per tick, how much of the distance outside the lane to pull back
+const SNAP_HEAD = 0.03;   // per tick, how much to turn the heading toward the lane direction
 
 const base = Math.max(p.apBase, p.minSpeed + 5, 30);
 const gain = (p.apCurve ?? 10) / 100;
@@ -40,7 +48,10 @@ if (mem.t0 === undefined) {
   mem.obst = 0; mem.stuck = 0; mem.retries = 0;
   mem.prog = { t: s.t, dist: s.dist, code: s.code };
   mem.distAt = 0; mem.logAt = s.t; mem.drawAt = 0; mem.saveAt = s.t;
-  ctx.log(`explore: start, base ${base}${p.apStopDist > 0 ? ' — set "Stop for obstacle" to 0 or it will freeze at cones' : ''}`);
+  mem.odo = 0; mem.ti = null; mem.fix = null;
+  mem.scale = 1;
+  try { mem.scale = Number(localStorage.getItem('rrExploreScale')) || 1; } catch (e) { /* no storage */ }
+  ctx.log(`explore: start, base ${base}, speed scale ${mem.scale.toFixed(2)}${p.apStopDist > 0 ? ' — set "Stop for obstacle" to 0 or it will freeze at cones' : ''}`);
 }
 const runMs = s.t - mem.t0;
 const web = typeof document !== 'undefined';
@@ -53,6 +64,27 @@ if (web && !window.__rrTrack) {
     .catch(() => { window.__rrTrack = 'none'; });
 }
 const track = web && Array.isArray(window.__rrTrack) ? window.__rrTrack : null;
+if (track && !window.__rrTrackCum) {
+  const cum = [0];
+  for (let i = 1; i <= track.length; i++) {
+    const a = track[i - 1], b = track[i % track.length];
+    cum.push(cum[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1]));
+  }
+  window.__rrTrackCum = cum; // cum[i] = cm along the track to point i, cum[N] = one lap
+}
+const N = track ? track.length : 0;
+const wrapA = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+// nearest track point to (x, y): within `win` points of `around`, or anywhere when around is null
+function nearest(x, y, around, win) {
+  let best = -1, bd = Infinity;
+  const from = around === null ? 0 : around - win, to = around === null ? N - 1 : around + win;
+  for (let k = from; k <= to; k++) {
+    const i = ((k % N) + N) % N, d = Math.hypot(track[i][0] - x, track[i][1] - y);
+    if (d < bd) { bd = d; best = i; }
+  }
+  return { i: best, d: bd };
+}
+const tangent = (i) => { const a = track[i], b = track[(i + 1) % N]; return Math.atan2(b[1] - a[1], b[0] - a[0]); };
 
 // Move the car to a new pose. Until the user has placed it, everything mapped so far moves along with it.
 function place(x, y, h, why) {
@@ -70,6 +102,28 @@ function place(x, y, h, why) {
     }
     mem.cells = moved;
   }
+  // Learn the speed scale: odometer since the last fix vs. the distance along the track between the two fixes.
+  const hit = track ? nearest(x, y, null, 0) : null;
+  if (why && hit && hit.d < LOST_CM && mem.fix && mem.odo > 60) {
+    const cum = window.__rrTrackCum, L = cum[N];
+    let arc = mem.fix.dir > 0 ? cum[hit.i] - cum[mem.fix.i] : cum[mem.fix.i] - cum[hit.i];
+    arc = ((arc % L) + L) % L;
+    while (arc + L / 2 < mem.odo) arc += L; // it may have gone round more than once
+    const ratio = arc / mem.odo;
+    if (ratio > 0.4 && ratio < 2.5) {
+      mem.scale = Math.max(0.3, Math.min(3, mem.scale * ratio ** 0.7));
+      try { localStorage.setItem('rrExploreScale', String(mem.scale)); } catch (e) { /* no storage */ }
+      ctx.log(`explore: drove ${Math.round(mem.odo)} cm by its count, ${Math.round(arc)} cm along the track → speed scale ${mem.scale.toFixed(2)}`);
+    } else {
+      ctx.log(`explore: odometer ${Math.round(mem.odo)} cm vs track ${Math.round(arc)} cm doesn't add up, speed scale stays ${mem.scale.toFixed(2)}`);
+    }
+  }
+  if (hit && hit.d < LOST_CM) {
+    mem.ti = hit.i;
+    mem.fix = { i: hit.i, dir: Math.cos(h - tangent(hit.i)) >= 0 ? 1 : -1 };
+    mem.lost = false;
+  }
+  mem.odo = 0;
   if (why) ctx.log(`explore: ${why} at ${Math.round(x)},${Math.round(y)} cm heading ${Math.round((h * 180) / Math.PI)}° after ${Math.round(runMs / 1000)} s — dead reckoning was ${Math.round(off)} cm and ${Math.round((((dh * 180) / Math.PI + 540) % 360) - 180)}° off`);
   mem.x = x; mem.y = y; mem.h = h;
 }
@@ -82,6 +136,7 @@ if (web && window.__rrPlace) {
   window.__rrPlace = null;
   place(f.x, f.y, f.h ?? mem.h, 'you placed the car');
   mem.userPlaced = true;
+  mem.trustUntil = s.t + 1500; // your placement wins over the track match for a moment
 }
 
 // ---- dead reckoning from what was actually sent to the motors during the last tick
@@ -89,10 +144,34 @@ const speed = (m) => {
   const a = Math.abs(m);
   return a <= p.minSpeed ? 0 : (Math.sign(m) * (Math.min(a, 100) - p.minSpeed) / (100 - p.minSpeed)) * VMAX;
 };
-const vl = speed(s.out[0]), vr = speed(s.out[1]);
+const vl = speed(s.out[0]) * mem.scale, vr = speed(s.out[1]) * mem.scale;
 mem.h += ((vr - vl) / WHEELBASE) * (dt / 1000);
 mem.x += Math.cos(mem.h) * ((vl + vr) / 2) * (dt / 1000);
 mem.y += Math.sin(mem.h) * ((vl + vr) / 2) * (dt / 1000);
+mem.odo += Math.abs((vl + vr) / 2) * (dt / 1000);
+
+// ---- keep the estimate on the gray lane (the car is lane keeping, so that's where it really is)
+if (track && mem.ti !== null && (vl || vr) && s.t > (mem.trustUntil || 0)) {
+  const m = nearest(mem.x, mem.y, mem.ti, 25); // stay near the last match so it can't jump to a neighbour strand
+  if (m.d > LOST_CM) {
+    if (!mem.lost) ctx.log(`explore: ${Math.round(m.d)} cm away from the track map, lost — tap 📍 and place me`);
+    mem.lost = true;
+  } else {
+    if (mem.lost) ctx.log('explore: back on the track map');
+    mem.lost = false;
+    mem.ti = m.i;
+    const q = track[m.i];
+    if (m.d > LANE_HALF) {
+      const k = (SNAP_POS * (m.d - LANE_HALF)) / m.d;
+      mem.x += (q[0] - mem.x) * k;
+      mem.y += (q[1] - mem.y) * k;
+    }
+    if (s.code === 0 && !mem.man) {
+      const tg = tangent(m.i), fwd = Math.cos(mem.h - tg) >= 0 ? tg : tg + Math.PI;
+      mem.h += wrapA(fwd - mem.h) * SNAP_HEAD;
+    }
+  }
+}
 
 const mark = (x, y, k) => {
   const key = Math.round(x / CELL) + ',' + Math.round(y / CELL);
@@ -199,16 +278,35 @@ if (s.t - mem.saveAt > 10000) {
 if (web && s.t - mem.drawAt > 300) {
   mem.drawAt = s.t;
   const dpr = window.devicePixelRatio || 1;
-  let cv = document.getElementById('rrMap');
-  if (!cv) {
-    cv = document.createElement('canvas');
+  const stale = document.getElementById('rrMap');
+  if (stale && !stale.closest('#rrMapBox')) stale.remove(); // from an older version of this script
+  let box = document.getElementById('rrMapBox');
+  const cv = box ? document.getElementById('rrMap') : document.createElement('canvas');
+  if (!box) {
+    // The box and the map let every touch through to the controls underneath; only the two small buttons
+    // take taps, and the map itself only while placing (after 📍).
+    box = document.createElement('div');
+    box.id = 'rrMapBox';
+    box.style.cssText = 'position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:50;pointer-events:none';
     cv.id = 'rrMap';
-    cv.style.cssText = 'position:fixed;top:56px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.85);' +
-      'border:1px solid #555;border-radius:8px;z-index:50;touch-action:none';
-    document.body.appendChild(cv);
-    // Finger down = where the car is, drag = which way it faces, lift = apply.
+    cv.style.cssText = 'display:block;background:rgba(0,0,0,.8);border:2px solid #555;border-radius:8px;touch-action:none;pointer-events:none';
+    const btn = (id, label, left, onTap) => {
+      const el = document.createElement('button');
+      el.id = id;
+      el.textContent = label;
+      el.style.cssText = `position:absolute;top:4px;left:${left}px;width:40px;height:34px;font-size:18px;border-radius:8px;` +
+        'border:1px solid #666;background:#222;color:#eee;pointer-events:auto;touch-action:manipulation';
+      el.addEventListener('click', (e) => { e.stopPropagation(); onTap(el); });
+      box.appendChild(el);
+    };
+    btn('rrMapPlace', '📍', 4, () => { window.__rrPlacing = !window.__rrPlacing; window.__rrTouch = null; });
+    btn('rrMapEye', '👁', 48, () => { window.__rrMapHidden = !window.__rrMapHidden; window.__rrPlacing = false; });
+    box.insertBefore(cv, box.firstChild);
+    document.body.appendChild(box);
+    // Finger down = where the car is, drag = which way it faces, lift = apply and stop placing.
     const at = (e) => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr]; };
     cv.addEventListener('pointerdown', (e) => {
+      if (!window.__rrPlacing) return;
       e.preventDefault(); e.stopPropagation();
       cv.setPointerCapture(e.pointerId);
       window.__rrTouch = { a: at(e), b: at(e) };
@@ -221,13 +319,19 @@ if (web && s.t - mem.drawAt > 300) {
       const [ax, ay] = tc.a, [bx, by] = tc.b;
       const drag = Math.hypot(bx - ax, by - ay) > 15 * dpr;
       window.__rrPlace = { x: v.x0 + ax / v.sc, y: v.y1 - ay / v.sc, h: drag ? Math.atan2(-(by - ay), bx - ax) : null };
+      window.__rrPlacing = false;
     };
     cv.addEventListener('pointerup', end);
     cv.addEventListener('pointercancel', end);
   }
-  cv.style.display = '';
+  box.style.display = '';
   clearTimeout(window.__rrMapHide);
-  window.__rrMapHide = setTimeout(() => { cv.style.display = 'none'; }, 5000); // hides once the script stops
+  window.__rrMapHide = setTimeout(() => { box.style.display = 'none'; window.__rrPlacing = false; }, 5000); // hides once the script stops
+  const placing = !!window.__rrPlacing;
+  cv.style.pointerEvents = placing ? 'auto' : 'none';
+  cv.style.borderColor = placing ? '#ff0' : '#555';
+  cv.style.visibility = window.__rrMapHidden ? 'hidden' : '';
+  document.getElementById('rrMapPlace').style.background = placing ? '#665c00' : '#222';
 
   // View in cm: the track plus everything mapped plus the car, with a margin.
   const keys = Object.keys(mem.cells);
@@ -280,6 +384,7 @@ if (web && s.t - mem.drawAt > 300) {
   }
   g.fillStyle = '#ccc';
   g.font = `${Math.round(12 * dpr)}px sans-serif`;
-  g.fillText(`${Math.round(runMs / 1000)}s  ${mem.obst} obst  ${mem.stuck} stuck${mem.userPlaced ? '' : '  · touch where the car is, drag its heading'}`, 6 * dpr, 16 * dpr);
+  const status = placing ? 'touch where the car is, drag its heading' : track ? (mem.lost ? 'LOST — tap 📍 and place me' : 'on track') : 'no track map (New build)';
+  g.fillText(`${Math.round(runMs / 1000)}s  ${mem.obst} obst  ${mem.stuck} stuck  speed ×${mem.scale.toFixed(2)}  ${status}`, 96 * dpr, 16 * dpr);
 }
 return cmd;
