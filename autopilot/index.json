@@ -1,7 +1,26 @@
 [
-  { "file": "lane.js", "name": "Lane keeper (stay inside the white lane)" },
-  { "file": "vision-pilot.js", "name": "Vision pilot (camera pose, lane keeper when the camera is lost)" },
-  { "file": "explore.js", "name": "Explore & map (lane keeper + distance sensor, draws a map)" },
-  { "file": "map.js", "name": "Mapping run (drives like Lane keeper, logs a track map)" },
-  { "file": "probe.js", "name": "Sensor probe (motors off, logs readings)" }
+  {
+    "file": "lane.js",
+    "name": "Lane keeper (stay inside the white lane)"
+  },
+  {
+    "file": "camera.js",
+    "name": "Camera pilot (camera steers, no map)"
+  },
+  {
+    "file": "vision-pilot.js",
+    "name": "Vision pilot (camera pose, lane keeper when the camera is lost)"
+  },
+  {
+    "file": "explore.js",
+    "name": "Explore & map (lane keeper + distance sensor, draws a map)"
+  },
+  {
+    "file": "map.js",
+    "name": "Mapping run (drives like Lane keeper, logs a track map)"
+  },
+  {
+    "file": "probe.js",
+    "name": "Sensor probe (motors off, logs readings)"
+  }
 ]

@@ -38,6 +38,9 @@ const PARAMS = [
   { g: 'Autopilot', k: 'apInvert', label: 'Invert sensors (follow a white line on a dark floor)', type: 'bool', def: false },
   { g: 'Autopilot', k: 'apOverride', label: 'Touch pads to override Auto', type: 'bool', def: true },
   { g: 'Autopilot', k: 'apStopDist', label: 'Stop for obstacle closer than (cm, 0 = off)', min: 0, max: 50, step: 1, def: 0 },
+  { g: 'Autopilot', k: 'camGain', label: 'Camera: steer gain', min: 0.2, max: 3, step: 0.05, def: 1, help: 'How hard to turn toward the free lane the camera sees.' },
+  { g: 'Autopilot', k: 'camCenter', label: 'Camera: center pull', min: 0, max: 1.5, step: 0.05, def: 0.4, help: 'How hard to steer back to the lane middle.' },
+  { g: 'Autopilot', k: 'camSlow', label: 'Camera: bend slowdown', min: 0, max: 0.9, step: 0.05, def: 0.4, help: 'Fraction of speed lost at full steering.' },
   { g: 'Autopilot', k: 'apDepth', label: 'Line queries in flight', min: 1, max: 4, step: 1, def: 2, help: 'More = more sensor readings per second (BLE round trip is ~70 ms on iPhone), same delay per reading.' },
   { g: 'Autopilot', k: 'apDistEvery', label: 'Read distance every N line reads (0 = never)', min: 0, max: 50, step: 1, def: 0, help: '?DIST blocks the robot for up to ~30 ms, so keep this off unless you need it.' },
   { g: 'Autopilot', k: 'apCurve', label: 'Curve learning (% per edge reading)', min: 0, max: 40, step: 1, def: 10, help: 'Lane keeper: how fast it learns which way the track bends. 0 = just bounce off the edges.' },
@@ -370,6 +373,7 @@ function runAutopilot(code, t) {
     dist: S.tel.dist, distAge: t - S.tel.distAt,
     out: S.out.slice(),
     vis: visState(t),
+    cam: window.__rrCam || null,
     // the camera's raw measurement, window.__rrVision v1 (docs/AUTONOMY-ARCHITECTURE.md §3.2)
     vision: window.__rrVision && window.__rrVision.robot && t - window.__rrVision.t < 1000 ? window.__rrVision : null,
   };
@@ -1286,6 +1290,7 @@ function init() {
   $('btnVisReset').onclick = visReset;
   $('btnVisForget').onclick = () => { if (V) { V.forget(); log('ap', 'vision: calibration samples cleared'); } };
   $('btnLinkTest').onclick = linkTest;
+  $('btnCam').onclick = () => import(`./cam.js?t=${T}`).then((m) => m.start(log)).catch((e) => log('err', 'camera: ' + e.message));
   $('btnCopyLog').onclick = copyLog;
   buildForm($('apParams'), 'Autopilot');
   for (const x of PARAMS) syncInputs(x.k);

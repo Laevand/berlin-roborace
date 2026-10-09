@@ -150,3 +150,10 @@ label.inline { display: inline-flex; gap: 4px; align-items: center; }
 /* Vision tab */
 #tab-vision.on { display: flex; flex-direction: column; }
 #vbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+/* Camera overlay (cam.js) */
+#camView { position: fixed; inset: 0; z-index: 50; background: #000; display: flex; flex-direction: column; }
+#camView.hidden { display: none; }
+#camView video { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+#camCanvas { flex: 1; min-height: 0; width: 100%; object-fit: contain; touch-action: none; }
+.camBar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: #0b0d12; }
+.camBar span { flex: 1; }
