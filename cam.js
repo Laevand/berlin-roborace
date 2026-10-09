@@ -18,15 +18,13 @@ function ensureDom() {
   el.id = 'camView';
   el.className = 'hidden';
   el.innerHTML = '<video id="camVideo" playsinline muted autoplay></video><canvas id="camCanvas"></canvas>' +
-    '<div class="camBar"><span id="camMsg">Tap your robot</span><button class="btn" id="camHide">Hide</button><button class="btn stop" id="camOff">Camera off</button></div>';
+    '<span id="camMsg">Tap your robot</span>';
   document.body.appendChild(el);
   video = el.querySelector('video');
   canvas = el.querySelector('canvas');
   g = canvas.getContext('2d');
   proc = document.createElement('canvas');
   pg = proc.getContext('2d', { willReadFrequently: true });
-  el.querySelector('#camHide').onclick = () => el.classList.add('hidden');
-  el.querySelector('#camOff').onclick = stop;
   canvas.addEventListener('pointerdown', (e) => {
     if (!vis) return;
     const r = canvas.getBoundingClientRect();
@@ -38,6 +36,9 @@ function ensureDom() {
 export async function start(log) {
   ensureDom();
   document.getElementById('camView').classList.remove('hidden');
+  const fitBar = () => document.getElementById('camView').style.setProperty('--barH', document.getElementById('bar').getBoundingClientRect().bottom + 'px');
+  fitBar();
+  addEventListener('resize', fitBar);
   if (cam.running) return;
   if (!Vision) ({ Vision, VDEFAULTS } = await import('./vision-core.js?t=' + (window.BUILD_T || Date.now())));
   if (!navigator.mediaDevices?.getUserMedia) { log('err', 'camera: not available in this browser'); return; }
