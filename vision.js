@@ -1,11 +1,8 @@
-// Camera debug page (vision.html): runs vision-core.js on the phone's camera, or on the synthetic camera with
-// ground truth (vision.html?demo), and draws everything it finds. Not connected to driving yet: the goal is to
-// see that it finds the lane and the robot reliably from any angle before it gets near the control loop.
+// Vision tab of the app (loaded on first use by app.js): runs vision-core.js on the phone's camera and draws everything
+// it finds. Not connected to driving yet: the goal is to see that it finds the lane and the robot reliably from any
+// angle before it gets near the control loop. The camera only runs while the tab is open.
 const T = new URL(import.meta.url).search;
 const { Vision, VDEFAULTS, classify } = await import('./vision-core.js' + T);
-
-const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-const UART_RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // phone -> robot (write)
 
 const SLIDERS = [
   ['procW', 'Resolution (px wide)', 160, 320, 40],
@@ -24,11 +21,10 @@ const SLIDERS = [
   ['bVal', 'Beacon min brightness', 0, 1, 0.01],
   ['colorTol', 'Taught color tolerance', 0.01, 0.2, 0.005],
 ];
-const DEFAULTS = { ...VDEFAULTS, procW: 240, view: 'overlay', tap: 'inspect', cam: 'follow' };
+const DEFAULTS = { ...VDEFAULTS, procW: 240, view: 'overlay', tap: 'inspect' };
 const load = () => { try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('rr.vision') || '{}') }; } catch { return { ...DEFAULTS }; } };
 const p = load();
 const save = () => { try { localStorage.setItem('rr.vision', JSON.stringify(p)); } catch { /* private mode */ } };
-const demo = new URLSearchParams(location.search).has('demo');
 
 document.head.insertAdjacentHTML('beforeend', `<style>
 #vmain { flex: 1; display: flex; min-height: 0; }
@@ -46,10 +42,10 @@ document.head.insertAdjacentHTML('beforeend', `<style>
 .good { color: var(--ok); } .bad { color: var(--bad); }
 @media (orientation: portrait) { #vmain { flex-direction: column; } #vpanel { width: auto; height: 42%; border-left: 0; border-top: 1px solid var(--line); } }
 </style>`);
-document.body.innerHTML = `
-<header id="bar">
-  <a class="btn" href="./" style="text-decoration:none">◀ App</a>
-  <button id="vStart" class="btn primary">${demo ? 'Demo' : 'Camera'}</button>
+const root = document.getElementById('tab-vision');
+root.innerHTML = `
+<header id="vbar">
+  <button id="vStart" class="btn primary">Camera</button>
   <button id="vFreeze" class="btn">Freeze</button>
   <div class="seg" id="vView"><button data-v="overlay">Overlay</button><button data-v="mask">Mask</button><button data-v="raw">Raw</button></div>
   <div class="seg" id="vTap"><button data-v="inspect">Tap: inspect</button><button data-v="robot">Tap: robot</button></div>
@@ -60,11 +56,9 @@ document.body.innerHTML = `
   <div id="vview"><canvas id="vcan"></canvas><video id="vvid" playsinline muted autoplay></video></div>
   <div id="vpanel">
     <div id="vRead"></div>
-    <div id="vScore"></div>
     <h4>Tap inspector</h4><div id="vInspect" class="muted small">Tap the picture to read a pixel's hue, saturation and brightness.</div>
     <div class="row"><button id="vCopy" class="btn">Copy report</button><button id="vReset" class="btn">Reset tracker</button><button id="vDefaults" class="btn">Defaults</button></div>
     <label>Robot detection <select id="vSrc"><option value="auto">auto: beacon, else dark gap</option><option value="beacon">green beacon only</option><option value="hole">dark gap in lane</option><option value="color">taught color (Tap: robot)</option></select></label>
-    ${demo ? '<label>Demo camera <select id="vCam"><option value="follow">follow (chest height)</option><option value="high">held high</option><option value="side">side of the mat</option></select></label><label class="inline"><input type="checkbox" id="vNoBeacon"> demo car without beacon</label>' : ''}
     <div id="vSliders"></div>
     <p class="muted small">Overlay: magenta = lane, yellow = filled gaps (the robot sits in one), cyan = centerline, green ring = robot,
       arrow = heading, red/blue = distance to the left/right edge, white fan = free lane ahead, thick ray = suggested steering.
@@ -76,9 +70,8 @@ const $ = (id) => document.getElementById(id);
 const can = $('vcan'), g = can.getContext('2d'), video = $('vvid');
 const proc = document.createElement('canvas'), pg = proc.getContext('2d', { willReadFrequently: true });
 const mk = document.createElement('canvas'), mg = mk.getContext('2d');
-let vis = null, synth = null, scoreFn = null, img = null, maskImg = null, res = null, gt = null, frozen = false, running = false;
-let w = 0, h = 0, fps = 0, lastFrame = 0, simT = 0;
-const stats = { n: 0, vis: 0, ok: 0, iou: 0, side: 0, sideN: 0, head: 0, headN: 0 };
+let vis = null, img = null, maskImg = null, res = null, frozen = false, running = false, active = false, stream = null, raf = 0;
+let w = 0, h = 0, fps = 0, lastFrame = 0;
 const samples = [];
 let inspect = null;
 
@@ -90,7 +83,6 @@ function buildSliders() {
     $('vs-' + k).oninput = (e) => { p[k] = Number(e.target.value); $('vv-' + k).textContent = p[k]; save(); if (k === 'procW') setup(); };
   }
   $('vSrc').value = p.robotSrc;
-  if ($('vCam')) $('vCam').value = p.cam;
   segOn('vView', p.view);
   segOn('vTap', p.tap);
 }
@@ -98,23 +90,20 @@ function segOn(id, v) { for (const b of $(id).children) b.classList.toggle('on',
 $('vView').onclick = (e) => { if (e.target.dataset.v) { p.view = e.target.dataset.v; segOn('vView', p.view); save(); draw(); } };
 $('vTap').onclick = (e) => { if (e.target.dataset.v) { p.tap = e.target.dataset.v; segOn('vTap', p.tap); save(); } };
 $('vSrc').onchange = (e) => { p.robotSrc = e.target.value; save(); vis?.reset(); };
-if ($('vCam')) $('vCam').onchange = (e) => { p.cam = e.target.value; save(); setup(); };
-if ($('vNoBeacon')) $('vNoBeacon').onchange = () => setup();
 $('vFreeze').onclick = () => { frozen = !frozen; $('vFreeze').classList.toggle('on', frozen); $('vFreeze').textContent = frozen ? 'Frozen' : 'Freeze'; };
-$('vReset').onclick = () => { vis?.reset(); Object.keys(stats).forEach((k) => (stats[k] = 0)); };
+$('vReset').onclick = () => { vis?.reset(); };
 $('vDefaults').onclick = () => { Object.assign(p, DEFAULTS); save(); buildSliders(); setup(); };
 $('vCopy').onclick = async () => {
-  const keep = ['n', 'vis', 'ok', 'sideN', 'side', 'headN', 'head'];
-  const rep = { build: T, demo, size: [w, h], fps: +fps.toFixed(1), ms: res && +res.ms.toFixed(1), W: res && +res.W.toFixed(1),
+  const rep = { build: T, size: [w, h], fps: +fps.toFixed(1), ms: res && +res.ms.toFixed(1), W: res && +res.W.toFixed(1),
     lane: res && +res.laneFrac.toFixed(3), robot: res?.robot?.map(Math.round), heading: res?.headingFrom, offset: res?.offset?.toFixed(2),
-    stats: demo ? Object.fromEntries(keep.map((k) => [k, stats[k]])) : undefined, samples, p: Object.fromEntries(Object.entries(p).filter(([k]) => k in DEFAULTS)) };
+    samples, p: Object.fromEntries(Object.entries(p).filter(([k]) => k in DEFAULTS)) };
   try { await navigator.clipboard.writeText(JSON.stringify(rep)); $('vCopy').textContent = 'Copied'; } catch { prompt('Copy this:', JSON.stringify(rep)); }
   setTimeout(() => ($('vCopy').textContent = 'Copy report'), 1500);
 };
 
 // ---- sources ----
-async function setup() {
-  const sw = demo ? 4 : video.videoWidth || 4, sh = demo ? 3 : video.videoHeight || 3;
+function setup() {
+  const sw = video.videoWidth || 4, sh = video.videoHeight || 3;
   w = Math.round(p.procW);
   h = Math.round((w * sh) / sw);
   proc.width = mk.width = w;
@@ -122,12 +111,6 @@ async function setup() {
   vis = new Vision(w, h);
   img = pg.createImageData(w, h);
   maskImg = mg.createImageData(w, h);
-  if (demo) {
-    const { SynthCam, score: sc } = await import('./vision-synth.js' + T);
-    scoreFn = sc;
-    synth = new SynthCam(w, h, { cam: p.cam, beacon: !$('vNoBeacon')?.checked });
-  }
-  Object.keys(stats).forEach((k) => (stats[k] = 0));
   fit();
 }
 function fit() {
@@ -144,53 +127,44 @@ addEventListener('resize', () => setTimeout(fit, 100));
 
 $('vStart').onclick = async () => {
   if (running) return;
-  if (!demo) {
-    if (!navigator.mediaDevices?.getUserMedia) { status('No camera API in this browser. Try Safari.', true); return; }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } });
-      video.srcObject = stream;
-      await video.play();
-      await new Promise((r) => (video.videoWidth ? r() : (video.onloadedmetadata = r)));
-    } catch (e) { status(`Camera failed: ${e.name || ''} ${e.message || e}`, true); return; }
-  }
+  if (!navigator.mediaDevices?.getUserMedia) { status('No camera API in this browser. Try Safari.', true); return; }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } });
+    video.srcObject = stream;
+    await video.play();
+    await new Promise((r) => (video.videoWidth ? r() : (video.onloadedmetadata = r)));
+  } catch (e) { stopCamera(); status(`Camera failed: ${e.name || ''} ${e.message || e}`, true); return; }
+  if (!active) { stopCamera(); return; } // left the tab while the permission prompt was open
   running = true;
   $('vStart').classList.remove('primary');
-  await setup();
-  requestAnimationFrame(loop);
+  setup();
+  raf = requestAnimationFrame(loop);
 };
+function stopCamera() {
+  running = false;
+  cancelAnimationFrame(raf);
+  stream?.getTracks().forEach((t) => t.stop());
+  stream = null;
+  video.srcObject = null;
+  $('vStart').classList.add('primary');
+}
 function status(t, bad) { $('vStatus').textContent = t; $('vStatus').classList.toggle('bad', !!bad); }
 
 // ---- main loop ----
 function loop(ts) {
-  requestAnimationFrame(loop);
+  if (!running || !active) return;
+  raf = requestAnimationFrame(loop);
   if (!vis || frozen) return;
-  if (!demo && (video.readyState < 2 || video.videoWidth === 0)) return;
-  if (!demo && Math.round((p.procW * video.videoHeight) / video.videoWidth) !== h) { setup(); return; } // rotated
+  if (video.readyState < 2 || video.videoWidth === 0) return;
+  if (Math.round((p.procW * video.videoHeight) / video.videoWidth) !== h) { setup(); return; } // rotated
   const dt = lastFrame ? Math.min(0.2, (ts - lastFrame) / 1000) : 0.05;
   lastFrame = ts;
   fps += (1 / Math.max(dt, 0.001) - fps) * 0.1;
-  if (demo) {
-    simT += dt;
-    gt = synth.render(simT, img.data);
-    pg.putImageData(img, 0, 0);
-  } else {
-    pg.drawImage(video, 0, 0, w, h);
-    img = pg.getImageData(0, 0, w, h);
-  }
+  pg.drawImage(video, 0, 0, w, h);
+  img = pg.getImageData(0, 0, w, h);
   res = vis.process(img.data, ts, p);
-  if (demo) score();
   draw();
   readouts();
-}
-
-function score() {
-  const s = scoreFn(res, gt, vis.drive);
-  stats.n++;
-  stats.iou += s.iou;
-  if (gt.robot) { stats.vis++; stats.ok += s.ok ? 1 : 0; }
-  if (s.sideOk != null) { stats.sideN++; stats.side += s.sideOk ? 1 : 0; }
-  if (s.headOk != null) { stats.headN++; stats.head += s.headOk ? 1 : 0; }
-  stats.last = s;
 }
 
 // ---- drawing ----
@@ -198,9 +172,8 @@ function draw() {
   if (!res || !w) return;
   const k = can.width / w;
   g.setTransform(1, 0, 0, 1, 0, 0);
-  g.imageSmoothingEnabled = !demo;
+  g.imageSmoothingEnabled = true;
   if (p.view === 'mask') { g.fillStyle = '#000'; g.fillRect(0, 0, can.width, can.height); }
-  else if (demo) g.drawImage(proc, 0, 0, can.width, can.height);
   else g.drawImage(video, 0, 0, can.width, can.height);
   if (p.view !== 'raw') {
     const d = maskImg.data, alpha = p.view === 'mask' ? 255 : 110;
@@ -219,7 +192,6 @@ function draw() {
   g.setTransform(k, 0, 0, k, 0, 0);
   g.lineWidth = 1.5 / k * (window.devicePixelRatio || 1);
   for (const c of res.cands) { g.strokeStyle = 'rgba(255,170,0,.8)'; g.strokeRect(c.x0, c.y0, c.x1 - c.x0 + 1, c.y1 - c.y0 + 1); }
-  if (gt?.robot) { g.strokeStyle = '#fff'; g.setLineDash([2, 2]); circle(gt.robot[0], gt.robot[1], res.W * 0.5); g.setLineDash([]); }
   if (res.robot) {
     const [x, y] = res.robot;
     g.strokeStyle = res.found ? '#2bd47d' : '#ffb020';
@@ -263,17 +235,6 @@ function readouts() {
     kv('Offset in lane', r.offset == null ? '–' : `${f(r.offset)} ${r.offset < -0.15 ? '◀ left' : r.offset > 0.15 ? 'right ▶' : 'center'}${r.offsetSure ? '' : ' (edge out of view)'}`) +
     kv('Free lane ahead', r.ahead == null ? '–' : `${f(r.ahead, 1)} widths`) +
     kv('Steer to', r.steer == null ? '–' : `${r.steer > 0 ? '+' : ''}${r.steer}°`);
-  if (demo && stats.n) {
-    const pc = (a, b) => (b ? `${((100 * a) / b).toFixed(1)} %` : '–');
-    const s = stats.last || {};
-    $('vScore').innerHTML = '<h4>Against ground truth (demo)</h4>' +
-      kv('Robot within ½ lane width', pc(stats.ok, stats.vis), stats.ok === stats.vis ? 'good' : 'bad') +
-      kv('Error now', s.err == null ? '–' : `${f(s.err)} W`, s.ok ? 'good' : 'bad') +
-      kv('Lane overlap (IoU)', `${f(stats.iou / stats.n, 3)} · now ${f(s.iou, 3)}`) +
-      kv('Offset side right', pc(stats.side, stats.sideN)) +
-      kv('Heading right', pc(stats.head, stats.headN)) +
-      kv('Frames', stats.n);
-  }
 }
 
 // ---- taps ----
@@ -299,26 +260,32 @@ can.addEventListener('pointerdown', (e) => {
   }
 });
 
-// ---- beacon lights over Bluetooth (Bluefy only; the main app's connection is separate) ----
-let rx = null;
-if (navigator.bluetooth?.requestDevice) $('vBle').classList.remove('hidden');
-$('vBle').onclick = async () => {
-  try {
-    if (!rx) {
-      let id = '';
-      try { id = JSON.parse(localStorage.getItem('rr.robotId') || '""'); } catch { /* none */ }
-      const filters = id ? [{ name: `BBC micro:bit [${id}]` }] : [{ namePrefix: 'BBC micro:bit' }];
-      const dev = await navigator.bluetooth.requestDevice({ filters, optionalServices: [UART_SERVICE] });
-      const srv = await (await dev.gatt.connect()).getPrimaryService(UART_SERVICE);
-      rx = await srv.getCharacteristic(UART_RX);
-      dev.addEventListener('gattserverdisconnected', () => { rx = null; $('vBle').textContent = 'Beacon lights'; });
-    }
-    for (const c of ['S', 'HLL,0,255,0', 'HLR,0,255,0', 'UG,0,0,0']) await rx.writeValue(new TextEncoder().encode(c + '#'));
-    $('vBle').textContent = 'Beacon on';
-  } catch (e) { status(`Bluetooth: ${e.message || e}`, true); }
+// ---- beacon lights: headlights green over the app's own connection (turn signals/underglow are switched off while on) ----
+const rr = () => window.rr;
+let beacon = false, fxWas = true;
+function beaconUi() { $('vBle').classList.toggle('hidden', !rr()?.link?.connected); $('vBle').textContent = beacon ? 'Beacon on' : 'Beacon lights'; }
+$('vBle').onclick = () => {
+  const a = rr();
+  if (!a?.link.connected) { status('Connect to the robot first (header)', true); return; }
+  beacon = !beacon;
+  if (beacon) {
+    fxWas = a.p.fx;
+    a.p.fx = false;
+    for (const c of ['S', 'HLL,0,255,0', 'HLR,0,255,0', 'UG,0,0,0']) a.link.send(c);
+  } else {
+    a.p.fx = fxWas;
+    a.link.send('HO');
+  }
+  beaconUi();
 };
 
+// Called by app.js when the Vision tab opens or closes: the camera only runs while the tab is open.
+export function setActive(on) {
+  active = on;
+  if (on) beaconUi();
+  else { if (beacon) { beacon = false; rr().p.fx = fxWas; rr().link.send('HO'); } stopCamera(); }
+}
+
 buildSliders();
-if (demo) $('vStart').click();
-else status('Tap Camera, point it at the track');
-window.rv = { get res() { return res; }, get stats() { return stats; }, p };
+status('Tap Camera, point it at the track');
+window.rv = { get res() { return res; }, p };

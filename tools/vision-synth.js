@@ -1,7 +1,7 @@
-// Synthetic camera for vision.html?demo and tools/smoke.mjs: the rally track from sim.js rendered through a phone
+// Synthetic camera for tools/smoke.mjs: the rally track from sim.js rendered through a phone
 // camera held by someone walking around the mat, following a robot that drives the lane. Every frame comes with
 // ground truth (robot position and heading in the picture, its offset in the lane, the lane mask) to score the pipeline.
-import { RALLY } from './sim.js';
+import { RALLY } from '../sim.js';
 
 const HALF = 10;    // cm, lane half width
 const EDGE = 1.2;   // cm, white edge line

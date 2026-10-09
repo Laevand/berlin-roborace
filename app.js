@@ -51,9 +51,6 @@ const PARAMS = [
   { g: 'Link', k: 'withResponse', label: 'Write with response (slower, for debugging)', type: 'bool', def: false },
   { g: 'Link', k: 'autoReconnect', label: 'Auto-reconnect after a drop (brownout)', type: 'bool', def: true },
 
-  { g: 'Demo', k: 'simTrack', label: 'Demo track', type: 'select', options: ['lane', 'line', 'rally'], def: 'lane', help: 'lane = white lane on an oval. line = black line on white. rally = 20 cm lane with an S-bend, motor lag and a lap timer.' },
-  { g: 'Demo', k: 'simLatency', label: 'Demo Bluetooth delay (ms round trip)', min: 0, max: 500, step: 10, def: 70 },
-  { g: 'Demo', k: 'simLink', label: 'Demo link', type: 'select', options: ['steady', 'varying'], def: 'steady', help: 'varying = the delay jumps by about 350 ms for a few seconds at random, like the iPhone link at the booth.' },
 
   { g: 'Lights', k: 'fx', label: 'Turn signals, brake light, underglow', type: 'bool', def: true },
   { g: 'Lights', k: 'headlight', label: 'Headlight brightness', min: 0, max: 255, step: 5, def: 80 },
@@ -801,8 +798,8 @@ async function connect() {
     return;
   }
   if (!BleTransport.supported()) {
-    log('err', 'No Web Bluetooth here. On iPhone open this page in the Bluefy browser. Starting demo mode instead.');
-    return startDemo();
+    log('err', 'No Web Bluetooth here. On iPhone open this page in the Bluefy browser.');
+    return;
   }
   try {
     const bt = new BleTransport(link, setState);
@@ -835,11 +832,12 @@ async function tryAutoReconnect() {
   }
 }
 
-async function startDemo() {
+// Test hook only (tools/smoke.mjs): drives a fake robot from sim.js. Nothing in the UI starts it.
+async function startSim(opts = {}) {
   const { SimTransport } = await import(`./sim.js?t=${T}`);
   const canvas = $('sim');
   canvas.classList.remove('hidden');
-  const sim = new SimTransport((text) => link.onText(text), canvas, () => ({ track: p.simTrack, latency: p.simLatency, link: p.simLink }));
+  const sim = new SimTransport((text) => link.onText(text), canvas, () => ({ latency: 70, link: 'steady', ...opts }));
   transport = sim;
   link.t = sim;
   setState('connected');
@@ -848,6 +846,16 @@ async function startDemo() {
 let wl = null;
 async function wakeLock() {
   try { if (navigator.wakeLock && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => { wl = null; }); } } catch { /* unsupported */ }
+}
+
+// The camera page lives in the Vision tab. It loads on first use and stops the camera when you leave the tab.
+let visionMod = null;
+async function showVision(on) {
+  try {
+    if (on && !visionMod) visionMod = import(`./vision.js?t=${T}`);
+    const m = await visionMod;
+    m?.setActive(on && ui.tab === 'vision');
+  } catch (e) { log('err', 'Vision failed to load: ' + (e.message || e)); visionMod = null; }
 }
 
 // ---------------------------------------------------------------- forms
@@ -1096,6 +1104,7 @@ function init() {
       for (const x of document.querySelectorAll('#tabSeg button')) x.classList.toggle('on', x === b);
       for (const s of document.querySelectorAll('.tab')) s.classList.toggle('on', s.id === 'tab-' + ui.tab);
       logDirty = true;
+      showVision(ui.tab === 'vision');
     };
   }
   document.addEventListener('click', (e) => {
@@ -1153,14 +1162,13 @@ function init() {
 
   if (!BleTransport.supported()) {
     $('status').textContent = 'No Web BLE: use Bluefy';
-    log('err', 'This browser has no Web Bluetooth. On iPhone, open this page in the Bluefy app. "Connect" starts demo mode here.');
+    log('err', 'This browser has no Web Bluetooth. On iPhone, open this page in the Bluefy app.');
   }
-  if (new URLSearchParams(location.search).has('demo')) startDemo();
-  else tryAutoReconnect();
+  tryAutoReconnect();
   log('ap', 'Ready');
 }
 
 // Exposed for debugging from the Log tab / tests.
-window.rr = { p, S, link, log, arm, disarm, emergencyStop, startDemo, linkTest, straightTest, get transport() { return transport; } };
+window.rr = { p, S, link, log, arm, disarm, emergencyStop, startSim, linkTest, straightTest, get transport() { return transport; } };
 
 init();

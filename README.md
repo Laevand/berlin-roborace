@@ -12,7 +12,7 @@ It is a static web app using **Web Bluetooth**. Safari on iOS doesn't support We
 2. Open the live app URL in Bluefy and bookmark it.
 3. Enter the robot's 5-letter ID in **Tune → Robot ID**, so the picker only shows your car at a busy booth. Then tap **Connect** and pick `BBC micro:bit [xxxxx]`.
 
-To try it without a robot, add `?demo` to the URL. That gives you a simulated car on a line track.
+The page needs a robot: there is no demo mode.
 
 ## The adjust loops, fastest first
 
@@ -52,7 +52,7 @@ To try it without a robot, add `?demo` to the URL. That gives you a simulated ca
 | `index.html` | Stable loader shell that cache-busts everything else. Don't edit it. |
 | `ui.html`, `style.css` | Markup and styling. |
 | `app.js` | BLE link, command queue, control loop, inputs, lights, telemetry, autopilot engine, Tune form. |
-| `sim.js` | Demo simulator, a fake robot speaking the same protocol. |
+| `sim.js` | The rally track's shape and a fake robot speaking the same protocol, for tests only (`tools/`). |
 | `autopilot/*.js` | Autopilot scripts, listed in `autopilot/index.json`. |
-| `vision.html`, `vision*.js` | Experimental camera page: finds the lane and the robot in the phone camera. `vision.html?demo` scores it against a synthetic camera. Not used for driving yet. |
+| `vision.js`, `vision-core.js` | The Vision tab: finds the lane and the robot in the phone camera. Not used for driving yet. |
 | `tools/smoke.mjs` | Headless test. Run `node tools/smoke.mjs` before pushing. |

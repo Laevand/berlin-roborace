@@ -1,4 +1,4 @@
-// Camera vision for the rally mat, used by vision.html. No DOM: it runs in the browser and in Node (tools/smoke.mjs).
+// Camera vision for the rally mat, used by the Vision tab (vision.js). No DOM: it runs in the browser and in Node (tools/smoke.mjs).
 // Input: one RGBA frame (w × h). Output: the lane mask, its centerline, the robot's position and where the robot sits
 // in the lane, all measured straight in the picture. That needs no map, so it works from whatever angle the phone sees.
 //   lane   = pink/purple/blue pixels, plus white pixels right next to them (the edge lines)
@@ -273,6 +273,18 @@ export class Vision {
     let laneN = 0;
     for (let i = 0; i < n; i++) { lane[i] = keep[this.labels[i]]; laneN += lane[i]; }
 
+    // 3b. lane width = 2 × median distance-to-edge along the centerline of the lane itself (not of `drive`: where strands
+    //     run side by side with a thin gap, closing merges them and the width would read far too big)
+    this.thin(lane);
+    this.distance(lane);
+    const ds = [];
+    for (let i = 0; i < n; i++) if (this.skel[i] && this.dt[i] < 65000) ds.push(this.dt[i]);
+    if (ds.length > 10) {
+      ds.sort((a, b) => a - b);
+      const Wm = (2 * ds[ds.length >> 1]) / 3 + 1;
+      this.W += (Math.max(4, Math.min(w / 2, Wm)) - this.W) * 0.5;
+    }
+
     // 4. drive = lane closed with a radius tied to the lane width, plus enclosed holes up to robot size
     const rc = Math.max(1, Math.round(p.closeK * this.W));
     this.box(lane, rc, tmp, false);
@@ -284,16 +296,9 @@ export class Vision {
     for (const c of comps) fill[c.id] = !c.border && c.area <= holeMax ? 1 : 0;
     for (let i = 0; i < n; i++) if (tmp[i] && fill[this.labels[i]]) drive[i] = 1;
 
-    // 5. centerline and lane width (2 × median distance-to-edge along the centerline)
+    // 5. centerline of drive
     this.thin(drive);
     this.distance(drive);
-    const ds = [];
-    for (let i = 0; i < n; i++) if (this.skel[i] && this.dt[i] < 65000) ds.push(this.dt[i]);
-    if (ds.length > 10) {
-      ds.sort((a, b) => a - b);
-      const Wm = (2 * ds[ds.length >> 1]) / 3 + 1;
-      this.W += (Math.max(4, Math.min(w / 2, Wm)) - this.W) * 0.5;
-    }
     const W = this.W;
 
     // 6. robot candidates: holes in the lane (or the taught color), and beacon blobs

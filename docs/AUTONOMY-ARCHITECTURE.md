@@ -5,7 +5,7 @@ This is the shared plan for the three agents now working in parallel:
 | Agent | Session | Works on today |
 |---|---|---|
 | **A — Map** | "Mapping run launch" | `autopilot/explore.js`: dead reckoning, lane snapping, 📍 placement, learned speed scale |
-| **B — Vision** | "Optical recognition pipeline" | `vision-core.js`, `vision-synth.js`, `vision.js`, `vision.html`: finds the track and the robot in phone-camera frames |
+| **B — Vision** | "Optical recognition pipeline" | `vision-core.js`, `tools/vision-synth.js`, `vision.js`: finds the track and the robot in phone-camera frames |
 | **C — Control** | "Control loop video feedback integration" (branch `claude/vision-control-loop`) | `app.js`: feeding vision into the control loop so the car corrects speed, turning and trim by itself |
 
 All three are building pieces of one loop: **see → estimate → drive → learn**. This document says who owns which piece, the interfaces between them, and the order to merge them. Where it conflicts with `CLAUDE.md`, `CLAUDE.md` wins.
@@ -25,7 +25,7 @@ All three are building pieces of one loop: **see → estimate → drive → lear
 
 ## 1. Hard constraints that shape the design
 
-1. **One page, one phone.** The BLE connection lives in the app page (`ui.html` + `app.js`). Navigating to `vision.html` drops it, and a second Bluefy tab gets throttled or suspended in the background. **So vision for driving has to run inside the app page.** `vision.html` stays a debug and test page and shares the same `vision-core.js`.
+1. **One page, one phone.** The BLE connection lives in the app page (`ui.html` + `app.js`), and the camera page is now its Vision tab, so vision and driving already share the page and the connection. Vision still isn't in the control loop.
 2. **Camera in Bluefy is unverified.** Before more integration work, someone has to confirm on the user's iPhone that `getUserMedia` works in Bluefy *while BLE is connected*, and that the camera permission prompt doesn't fire `visibilitychange`/`pagehide`. Those events stop the car, by design. If either check fails, vision is a post-event project and A + C go back to the tap-based loop.
 3. **The phone's CPU is shared with the control tick.** `tick()` runs on `setInterval(p.tickMs)` on the main thread. A 40 ms vision frame on the main thread delays motor commands. Vision must run in a **Worker** (frames sent as `ImageBitmap` or downscaled `ImageData`), or at most process one ≤160 px-wide frame per tick and skip frames when it falls behind. Gate: tick jitter p95 must not rise by more than 10 ms with vision on. Log it.
 4. **Vision adds no Bluetooth traffic.** It only adds information on the phone. The BLE budget (one motor update, one query and one light command per tick) stays unchanged.
@@ -166,7 +166,7 @@ IDLE ──GO──► CALIBRATE ──1 lap or 60 s──► RUN ──lane exi
 
 | File | Owner | Others may |
 |---|---|---|
-| `vision-core.js`, `vision-synth.js`, `vision.js`, `vision.html` | B | read only |
+| `vision-core.js`, `tools/vision-synth.js`, `vision.js` | B | read only |
 | `autopilot/explore.js` (estimator, map, supervisor-in-script, L1) | A | send A a message for changes |
 | `app.js`, `ui.html`, `style.css` (vision toggle, video element, Worker start, `s.vision`, Reset learning button) | C | B hands C a `startVision(videoEl, { onMeasurement })` / `stopVision()` API, and C wires it in. B doesn't edit app.js |
 | Adapter logic | C writes it as a section of `explore.js` **or** as `autopilot/lib/learn.js` once scripts can import (they can't today, since scripts are function bodies). For now, C sends A the code block, or the two agree on a clearly delimited `// ---- learn (C)` section | |
@@ -195,7 +195,7 @@ Add these to `tools/smoke.mjs` / `simrun`:
 ## 6. Order of work
 
 1. **Now (all):** read this, reply to the user with any disagreement on §3 in one message, then build to the contract.
-2. **B:** keep proving correctness on `vision.html`. Expose `startVision`/`stopVision` and `window.__rrVision` v1. Add hostile frames to `vision-synth.js`. Do the Bluefy camera + BLE check on the phone first (§1.2).
+2. **B:** keep proving correctness in the Vision tab. Expose `startVision`/`stopVision` and `window.__rrVision` v1. Add hostile frames to `vision-synth.js`. Do the Bluefy camera + BLE check on the phone first (§1.2).
 3. **A:** refactor the 📍 path into `fix({..., sigma, source})` with gating + latency compensation, and read `s.vision`. Publish `mem.world`. Make RECOVER use the pose when it's trusted.
 4. **C:** add `s.vision` plumbing (one line in `runAutopilot`), mount vision behind `?vision` / a Tune toggle, default off, and add simrun `--vision` modes. Write the adapter (§3.4) and send it to A as an `explore.js` section.
 5. **Merge order:** C plumbing (no-op without vision) → A estimator (works with taps alone) → B mount via C → adapter. Run smoke + simrun after each step, and test on the robot before the next.

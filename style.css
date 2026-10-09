@@ -146,3 +146,7 @@ label.inline { display: inline-flex; gap: 4px; align-items: center; }
 #log .rx { color: #8ff0b8; }
 #log .err { color: var(--bad); }
 #log .ap { color: #e7c6ff; }
+
+/* Vision tab */
+#tab-vision.on { display: flex; flex-direction: column; }
+#vbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); }

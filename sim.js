@@ -1,35 +1,32 @@
-// Demo mode: a fake Cutebot that speaks the same UART protocol as microbitapi.js.
-// Three tracks (Tune → Demo): "lane" is a wide white lane on an oval, "line" is a thin black line on white,
-// and "rally" is a 20 cm white lane with an S-bend and a long loop, with motor lag, a grip limit and a lap
-// timer. The Bluetooth delay can also jump between fast and slow like the real link ("varying").
+// The rally track and a fake Cutebot that speaks the same UART protocol as microbitapi.js.
+// This is not a user-facing demo page: the app never starts it. tools/smoke.mjs and tools/simrun.mjs drive it, and
+// autopilot/explore.js and the camera tests use RALLY (the track outline).
 // SimCar (physics, track, laps) and LinkModel have no DOM, so tools/simrun.mjs runs them in Node.
-// Tap the drawing to put the car back on the start line. Only a sanity check: the real robot will differ.
+// Only a sanity check: the real robot will differ.
 
-const STRAIGHT = 120;      // cm, length of each straight
-const RADIUS = 45;         // cm, radius of the curves
-const LINE_HALF = 1.2;     // cm, half width of the black line ("line" track)
-const LANE_HALF = 12;      // cm, half width of the white lane ("lane" track)
 const SENSOR_HALF = 0.8;   // cm, sensor offset left/right of center
 const SENSOR_AHEAD = 6;    // cm, sensors ahead of the wheel axle
 const WHEELBASE = 9;       // cm
 const VMAX = 50;           // cm/s at motor 100
 const DEADBAND = 20;       // motor values below this do not move the wheel
 
-// "rally": the official mat (droidconHQ/CuteBotDriver images/race_booth_area.jpg, and the photo of the floor).
-// Corners [x, y, fillet radius] in photo pixels, scaled by CM_PER_PX (the lane is ~35 px = 20 cm wide).
-// Start on the bottom straight heading east, right-hand loop, long top strand west, then the meander:
-// five vertical strands joined by four U-turns, ending on the bottom straight again.
-// Traced by eye from a perspective photo: lane width 20 cm is measured, the rest is approximate.
-const CM_PER_PX = 0.55;
-const RALLY_CORNERS = [[700, 505, 0], [990, 505, 80], [990, 222, 80], [190, 222, 40], [190, 505, 35], [260, 505, 35],
-  [260, 325, 35], [330, 325, 35], [330, 505, 35], [400, 505, 35], [400, 325, 35], [470, 325, 35], [470, 505, 35]];
+// The official mat, rectified from the booth photo (portrait, far end of the mat at the top). One closed lane, 20 cm wide:
+// a tall rounded loop (left strand down, bottom strand across, right strand up, top strand back) whose bottom-right
+// corner is replaced by a five-strand horizontal meander (an S of four U-turns) between the bottom strand and the
+// right strand. Race direction is counter-clockwise (arrows on the mat: down on the left, up on the right).
+// Corners [x, y, fillet radius] in rectified photo pixels (y down), 0.5556 cm per pixel (the lane is 36 px = 20 cm).
+// Traced from a perspective photo with a rough homography: lane width 20 cm is measured, lengths are within ~10 %.
+// The start is on the bottom strand heading east (x grows to the right, y up in the simulator).
+const CM_PER_PX = 20 / 36;
+const RALLY_CORNERS = [[200, 496, 0], [303, 496, 24], [303, 448, 24], [220, 448, 24], [220, 400, 24], [303, 400, 24], [303, 352, 24],
+  [181, 352, 24], [181, 304, 24], [303, 304, 50], [303, 43, 55], [100, 43, 50], [100, 496, 45]];
 const RALLY_HALF = 10;     // cm, lane is 20 cm wide
-const MOTOR_TAU = 0.15;    // s, wheel speed lag (rally)
-const GRIP_AY = 300;       // cm/s², lateral acceleration limit (rally)
+const MOTOR_TAU = 0.15;    // s, wheel speed lag
+const GRIP_AY = 300;       // cm/s², lateral acceleration limit
 
 // closed polyline through the corners, each rounded with its fillet radius, a point about every 4 cm
 function buildRally() {
-  const V = RALLY_CORNERS.map(([x, y, r]) => [(x - 580) * CM_PER_PX, -(y - 370) * CM_PER_PX, r * CM_PER_PX]);
+  const V = RALLY_CORNERS.map(([x, y, r]) => [(x - 200) * CM_PER_PX, -(y - 270) * CM_PER_PX, r * CM_PER_PX]);
   const pts = [];
   const line = (a, b) => {
     const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 4));
@@ -80,17 +77,14 @@ export class LinkModel {
 }
 
 export class SimCar {
-  // opts() returns { track: 'lane' | 'line' | 'rally', vmax }, read live.
+  // opts() returns { vmax }, read live.
   constructor(opts = () => ({})) {
     this.opts = opts;
     this.time = 0;
     this.reset();
   }
 
-  get rally() { return this.trackName === 'rally'; }
-
   reset() {
-    this.trackName = this.opts().track || 'lane';
     this.l = 0;
     this.r = 0;
     this.v = 0;
@@ -104,15 +98,9 @@ export class SimCar {
     this.lapStart = 0;
     this.maxProg = 0;
     this.prevIdx = 0;
-    if (this.rally) {
-      this.x = RALLY[0][0];
-      this.y = RALLY[0][1];
-      this.th = Math.atan2(RALLY[1][1] - RALLY[0][1], RALLY[1][0] - RALLY[0][0]);
-    } else {
-      this.x = -STRAIGHT / 4;
-      this.y = -RADIUS;
-      this.th = 0;
-    }
+    this.x = RALLY[0][0];
+    this.y = RALLY[0][1];
+    this.th = Math.atan2(RALLY[1][1] - RALLY[0][1], RALLY[1][0] - RALLY[0][0]);
   }
 
   wheel(s) {
@@ -121,25 +109,17 @@ export class SimCar {
   }
 
   step(dt) {
-    if ((this.opts().track || 'lane') !== this.trackName) this.reset();
-    const tl = this.wheel(this.l);
-    const tr = this.wheel(this.r);
-    if (this.rally) {
-      const k = 1 - Math.exp(-dt / MOTOR_TAU);
-      this.vl += (tl - this.vl) * k;
-      this.vr += (tr - this.vr) * k;
-    } else {
-      this.vl = tl;
-      this.vr = tr;
-    }
+    const k = 1 - Math.exp(-dt / MOTOR_TAU);
+    this.vl += (this.wheel(this.l) - this.vl) * k;
+    this.vr += (this.wheel(this.r) - this.vr) * k;
     this.v = (this.vl + this.vr) / 2;
     this.w = (this.vr - this.vl) / WHEELBASE;
-    if (this.rally && Math.abs(this.v * this.w) > GRIP_AY) this.w = Math.sign(this.w) * GRIP_AY / Math.abs(this.v); // slides wide
+    if (Math.abs(this.v * this.w) > GRIP_AY) this.w = Math.sign(this.w) * GRIP_AY / Math.abs(this.v); // slides wide
     this.th += this.w * dt;
     this.x += Math.cos(this.th) * this.v * dt;
     this.y += Math.sin(this.th) * this.v * dt;
     this.time += dt;
-    if (this.rally) this.lapStep(dt);
+    this.lapStep(dt);
     if (this.v !== 0 || this.w !== 0) {
       this.trail.push([this.x, this.y]);
       if (this.trail.length > 600) this.trail.shift();
@@ -160,6 +140,9 @@ export class SimCar {
     return { d: best, i: bi };
   }
 
+  // distance from a point to the lane center line
+  static offTrack(x, y) { return SimCar.nearestRally(x, y).d; }
+
   lapStep(dt) {
     const n = RALLY.length;
     const { d, i } = SimCar.nearestRally(this.x, this.y);
@@ -170,14 +153,6 @@ export class SimCar {
       this.maxProg = 0;
     } else if (prog > this.maxProg && prog - this.maxProg < 0.15) this.maxProg = prog;
     this.prevIdx = i;
-  }
-
-  // distance from a point to the oval's center line
-  static offTrack(x, y) {
-    const h = STRAIGHT / 2;
-    if (Math.abs(x) <= h) return Math.abs(Math.abs(y) - RADIUS);
-    const cx = Math.sign(x) * h;
-    return Math.abs(Math.hypot(x - cx, y) - RADIUS);
   }
 
   sensors() {
@@ -193,14 +168,8 @@ export class SimCar {
     ];
   }
 
-  get lane() { return this.trackName !== 'line'; }
-
-  // true when a point reads black: off the lane, or on the line
-  black(x, y) {
-    if (this.rally) return SimCar.nearestRally(x, y).d > RALLY_HALF;
-    const d = SimCar.offTrack(x, y);
-    return this.lane ? d > LANE_HALF : d < LINE_HALF;
-  }
+  // true when a point reads black: off the lane
+  black(x, y) { return SimCar.nearestRally(x, y).d > RALLY_HALF; }
 
   lineCode() {
     const [left, right] = this.sensors();
@@ -209,13 +178,13 @@ export class SimCar {
 }
 
 export class SimTransport extends SimCar {
-  // opts() returns { track: 'lane' | 'line' | 'rally', latency: extra round-trip ms, link: 'steady' | 'varying' }, read live.
+  // opts() returns { latency: extra round-trip ms, link: 'steady' | 'varying' }, read live.
   constructor(onText, canvas, opts = () => ({})) {
     super(opts);
     this.onText = onText;
     this.canvas = canvas;
     this.connected = true;
-    this.name = 'BBC micro:bit [demo]';
+    this.name = 'BBC micro:bit [sim]';
     this.inbuf = '';
     this.linkModel = new LinkModel();
     this.last = performance.now();
@@ -295,41 +264,27 @@ export class SimTransport extends SimCar {
     const W = (c.width = c.clientWidth * dpr);
     const H = (c.height = c.clientHeight * dpr);
     const g = c.getContext('2d');
-    let worldW = STRAIGHT + 2 * RADIUS + 2 * LANE_HALF + 10;
-    let worldH = 2 * RADIUS + 2 * LANE_HALF + 10;
-    if (this.rally) {
-      worldW = RALLY_BOX[0][1] - RALLY_BOX[0][0] + 2 * RALLY_HALF + 10;
-      worldH = RALLY_BOX[1][1] - RALLY_BOX[1][0] + 2 * RALLY_HALF + 34; // room for the lap text on top
-    }
+    const worldW = RALLY_BOX[0][1] - RALLY_BOX[0][0] + 2 * RALLY_HALF + 10;
+    const worldH = RALLY_BOX[1][1] - RALLY_BOX[1][0] + 2 * RALLY_HALF + 34; // room for the lap text on top
     const k = Math.min(W / worldW, H / worldH);
-    const mx = this.rally ? (RALLY_BOX[0][0] + RALLY_BOX[0][1]) / 2 : 0;
-    const my = this.rally ? (RALLY_BOX[1][0] + RALLY_BOX[1][1]) / 2 + 12 : 0;
+    const mx = (RALLY_BOX[0][0] + RALLY_BOX[0][1]) / 2;
+    const my = (RALLY_BOX[1][0] + RALLY_BOX[1][1]) / 2 + 12;
     g.setTransform(k, 0, 0, -k, W / 2 - mx * k, H / 2 + my * k);
-    g.fillStyle = this.lane ? '#111' : '#f4f4f4';
+    g.fillStyle = '#111';
     g.fillRect(mx - worldW, my - worldH, 2 * worldW, 2 * worldH);
-    g.strokeStyle = this.lane ? '#f4f4f4' : '#111';
-    g.lineWidth = (this.rally ? RALLY_HALF : this.lane ? LANE_HALF : LINE_HALF) * 2;
+    g.strokeStyle = '#f4f4f4';
+    g.lineWidth = RALLY_HALF * 2;
     g.beginPath();
-    if (this.rally) {
-      g.moveTo(...RALLY[0]);
-      for (const q of RALLY) g.lineTo(...q);
-      g.closePath();
-    } else {
-      g.moveTo(-STRAIGHT / 2, -RADIUS);
-      g.lineTo(STRAIGHT / 2, -RADIUS);
-      g.arc(STRAIGHT / 2, 0, RADIUS, -Math.PI / 2, Math.PI / 2);
-      g.lineTo(-STRAIGHT / 2, RADIUS);
-      g.arc(-STRAIGHT / 2, 0, RADIUS, Math.PI / 2, (3 * Math.PI) / 2);
-    }
+    g.moveTo(...RALLY[0]);
+    for (const q of RALLY) g.lineTo(...q);
+    g.closePath();
     g.stroke();
-    if (this.rally) {
-      g.strokeStyle = '#2bd47d';
-      g.lineWidth = 1.5;
-      g.beginPath();
-      g.moveTo(RALLY[0][0], RALLY[0][1] - RALLY_HALF);
-      g.lineTo(RALLY[0][0], RALLY[0][1] + RALLY_HALF);
-      g.stroke();
-    }
+    g.strokeStyle = '#2bd47d';
+    g.lineWidth = 1.5;
+    g.beginPath();
+    g.moveTo(RALLY[0][0], RALLY[0][1] - RALLY_HALF);
+    g.lineTo(RALLY[0][0], RALLY[0][1] + RALLY_HALF);
+    g.stroke();
     if (this.trail.length > 1) {
       g.strokeStyle = 'rgba(176,76,255,.6)';
       g.lineWidth = 0.6;
@@ -350,7 +305,7 @@ export class SimTransport extends SimCar {
     g.beginPath(); g.arc(sl[0], sl[1], 0.9, 0, 7); g.fill();
     g.fillStyle = code & 1 ? '#2bd47d' : '#ff3b5c';
     g.beginPath(); g.arc(sr[0], sr[1], 0.9, 0, 7); g.fill();
-    if (this.rally) {
+    {
       g.setTransform(1, 0, 0, 1, 0, 0);
       g.fillStyle = '#fff';
       g.font = `${10 * dpr}px monospace`;
