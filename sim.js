@@ -79,8 +79,20 @@ export class LinkModel {
   }
 }
 
+// Lane center line of a demo track as { center: [[x, y], ...] cm in driving order, width cm }, for the fake camera.
+export function trackCenter(name) {
+  if (name === 'rally') return { center: RALLY, width: 2 * RALLY_HALF };
+  const pts = [];
+  const h = STRAIGHT / 2;
+  for (let x = -h; x < h; x += 4) pts.push([x, -RADIUS]);
+  for (let a = -90; a < 90; a += 5) pts.push([h + RADIUS * Math.cos((a * Math.PI) / 180), RADIUS * Math.sin((a * Math.PI) / 180)]);
+  for (let x = h; x > -h; x -= 4) pts.push([x, RADIUS]);
+  for (let a = 90; a < 270; a += 5) pts.push([-h + RADIUS * Math.cos((a * Math.PI) / 180), RADIUS * Math.sin((a * Math.PI) / 180)]);
+  return { center: pts, width: name === 'line' ? 2 * LINE_HALF : 2 * LANE_HALF };
+}
+
 export class SimCar {
-  // opts() returns { track: 'lane' | 'line' | 'rally', vmax }, read live.
+  // opts() returns { track: 'lane' | 'line' | 'rally', vmax, skew }, read live.
   constructor(opts = () => ({})) {
     this.opts = opts;
     this.time = 0;
@@ -122,8 +134,9 @@ export class SimCar {
 
   step(dt) {
     if ((this.opts().track || 'lane') !== this.trackName) this.reset();
-    const tl = this.wheel(this.l);
-    const tr = this.wheel(this.r);
+    const skew = (this.opts().skew || 0) / 100; // + = right wheel stronger (the car drifts left)
+    const tl = this.wheel(this.l) * (1 - skew);
+    const tr = this.wheel(this.r) * (1 + skew);
     if (this.rally) {
       const k = 1 - Math.exp(-dt / MOTOR_TAU);
       this.vl += (tl - this.vl) * k;

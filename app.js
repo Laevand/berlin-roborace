@@ -43,6 +43,15 @@ const PARAMS = [
   { g: 'Autopilot', k: 'apCurve', label: 'Curve learning (% per edge reading)', min: 0, max: 40, step: 1, def: 10, help: 'Lane keeper: how fast it learns which way the track bends. 0 = just bounce off the edges.' },
   { g: 'Autopilot', k: 'apCurveDecay', label: 'Curve memory (ms)', min: 200, max: 5000, step: 100, def: 1500, help: 'Lane keeper: how long a learned bend lasts once the edges stop being touched.' },
   { g: 'Autopilot', k: 'apTimeoutMs', label: 'Stop if no sensor data for (ms)', min: 100, max: 1000, step: 10, def: 300 },
+  { g: 'Autopilot', k: 'visLook', label: 'Vision pilot: look-ahead (cm)', min: 5, max: 60, step: 1, def: 18, help: 'Vision pilot aims at the lane center this far ahead. Longer = smoother, cuts corners more.' },
+  { g: 'Autopilot', k: 'visGrip', label: 'Vision pilot: corner grip (cm/s²)', min: 50, max: 800, step: 10, def: 250, help: 'Slows down before bends so the sideways acceleration stays below this. Higher = faster corners.' },
+
+  { g: 'Vision', k: 'visCal', label: 'Self-calibrate from the camera', type: 'select', options: ['off', 'suggest', 'auto'], def: 'suggest', help: 'Learned values sit on top of your sliders and never move them. off = ignore them (driving uses the sliders only). suggest = the Log says what the camera measured, Apply fit takes it. auto = learn by itself in small steps while you drive.' },
+  { g: 'Vision', k: 'visMaxStep', label: 'Auto: largest learned-trim change per step', min: 0.5, max: 5, step: 0.5, def: 1 },
+  { g: 'Vision', k: 'visLatency', label: 'Camera delay when the feed has no timestamps (ms)', min: 0, max: 1000, step: 10, def: 120 },
+  { g: 'Vision', k: 'visTimeout', label: 'Camera counts as lost after (ms)', min: 100, max: 2000, step: 50, def: 500 },
+  { g: 'Vision', k: 'visLaps', label: 'Camera taps Lap when the car crosses the start', type: 'bool', def: true },
+  { g: 'Vision', k: 'visUrl', label: 'Feed URL (wss://… or an https:// event stream; empty = this page or another tab)', type: 'text', def: '' },
 
   { g: 'Link', k: 'tickMs', label: 'Control tick (ms)', min: 20, max: 150, step: 5, def: 50, help: 'In manual mode motors are updated at most once per tick. The firmware docs suggest 50–100.' },
   { g: 'Link', k: 'telemetry', label: 'Telemetry in manual mode', type: 'bool', def: true },
@@ -54,6 +63,8 @@ const PARAMS = [
   { g: 'Demo', k: 'simTrack', label: 'Demo track', type: 'select', options: ['lane', 'line', 'rally'], def: 'lane', help: 'lane = white lane on an oval. line = black line on white. rally = 20 cm lane with an S-bend, motor lag and a lap timer.' },
   { g: 'Demo', k: 'simLatency', label: 'Demo Bluetooth delay (ms round trip)', min: 0, max: 500, step: 10, def: 70 },
   { g: 'Demo', k: 'simLink', label: 'Demo link', type: 'select', options: ['steady', 'varying'], def: 'steady', help: 'varying = the delay jumps by about 350 ms for a few seconds at random, like the iPhone link at the booth.' },
+  { g: 'Demo', k: 'simVision', label: 'Demo camera feed', type: 'bool', def: true, help: 'Sends the simulated car\'s pose like a real vision feed: 30 fps, 80 ms late, a little noise.' },
+  { g: 'Demo', k: 'simSkew', label: 'Demo right wheel stronger by (%)', min: -10, max: 10, step: 0.5, def: 0, help: 'A crooked car, to watch self-calibration fix the trim.' },
 
   { g: 'Lights', k: 'fx', label: 'Turn signals, brake light, underglow', type: 'bool', def: true },
   { g: 'Lights', k: 'headlight', label: 'Headlight brightness', min: 0, max: 255, step: 5, def: 80 },
@@ -364,6 +375,9 @@ function runAutopilot(code, t) {
     dt: S.mem._t ? t - S.mem._t : 0,
     dist: S.tel.dist, distAge: t - S.tel.distAt,
     out: S.out.slice(),
+    vis: visState(t),
+    // the camera's raw measurement, window.__rrVision v1 (docs/AUTONOMY-ARCHITECTURE.md §3.2)
+    vision: window.__rrVision && window.__rrVision.robot && t - window.__rrVision.t < 1000 ? window.__rrVision : null,
   };
   S.mem._t = t;
   try {
@@ -377,6 +391,175 @@ function runAutopilot(code, t) {
     log('err', 'autopilot: ' + e.message);
     $('apStatus').textContent = 'Error: ' + e.message;
   }
+}
+
+// ---------------------------------------------------------------- vision feedback (adapt.js, VISION.md)
+
+// A camera pipeline reports the car's pose. It reaches autopilot scripts as s.vis, and the fit of what the car
+// did against the motor commands sent learns trim, speed, deadband, wheelbase and delay (Tune → Vision).
+let V = null; // Adapter from adapt.js once loaded; until then (or if it fails) everything here is a no-op
+const vis = { src: '', sock: null, timer: 0, calAt: 0, applyAt: 0, sugAt: 0, sugKey: '', renderAt: 0, lastObj: null };
+
+// Learned values live under one versioned key shared with autopilot scripts (rrLearn.v1). They are added to the
+// user's sliders, never written into them. Other keys in it belong to other code and are kept on every write.
+const LEARN_KEY = 'rrLearn.v1';
+const LEARN_MINE = ['trimLearned', 'vmax', 'deadband', 'wheelbase', 'delay', 'turnGain'];
+const LEARN_DEF0 = { trimLearned: 0, vmax: 50, deadband: 22, wheelbase: 9, delay: 150 }; // = LEARN_DEF in adapt.js
+function learnLoad() {
+  try { const o = JSON.parse(localStorage.getItem(LEARN_KEY) || '{}'); return o && typeof o === 'object' ? o : {}; } catch { return {}; }
+}
+let learned = learnLoad();
+const lv = (k) => (Number.isFinite(learned[k]) ? learned[k] : LEARN_DEF0[k]);
+function learnWrite(ch, reset = false) {
+  const o = learnLoad();
+  if (reset) for (const k of LEARN_MINE) delete o[k];
+  Object.assign(o, ch);
+  if (!reset) { o.turnGain = Number((9 / (o.wheelbase || 9)).toFixed(3)); o.at = Date.now(); }
+  learned = o;
+  try { localStorage.setItem(LEARN_KEY, JSON.stringify(o)); } catch { /* private mode */ }
+}
+
+async function loadVision() {
+  try {
+    const m = await import(`./adapt.js?t=${T}`);
+    V = new m.Adapter();
+    vis.propose = m.proposeChanges;
+  } catch (e) {
+    log('err', 'Vision module failed to load: ' + e.message);
+    return;
+  }
+  try { new BroadcastChannel('rr-vision').onmessage = (e) => visionIngest(e.data, 'tab'); } catch { /* unsupported */ }
+  window.addEventListener('message', (e) => { if (e.origin === location.origin && e.data && e.data.rrVision) visionIngest(e.data.rrVision, 'page'); });
+  visionConnect();
+  setInterval(visCalTick, 1000);
+}
+
+// The in-page camera publishes window.__rrVision (a new object per frame, poses in the RALLY frame).
+function pollCamera() {
+  const m = window.__rrVision;
+  if (!V || !m || m === vis.lastObj) return;
+  vis.lastObj = m;
+  if (!V.track && !vis.trackLoading) {
+    vis.trackLoading = true;
+    import(`./sim.js?t=${T}`).then((s) => { if (!V.track) visionIngest({ type: 'track', ...s.trackCenter('rally') }, 'camera'); }).catch(() => { vis.trackLoading = false; });
+  }
+  visionIngest(m, 'camera');
+}
+
+// One message (object, JSON text, or an array of them) from any source. Returns what it was, or null.
+function visionIngest(msg, src = 'api') {
+  if (!V) return null;
+  if (Array.isArray(msg)) return msg.map((m) => visionIngest(m, src)).pop() ?? null;
+  let r = null;
+  try {
+    r = V.ingest(msg, now(), Date.now(), { latency: p.visLatency, robotId: ui.name });
+  } catch (e) {
+    if (now() - (vis.errAt || 0) > 5000) { vis.errAt = now(); log('err', 'vision: ' + e.message); }
+  }
+  if (!r) return null;
+  vis.src = src;
+  if (r === 'track') log('ap', `vision: track outline ${V.track.len.toFixed(0)} cm long, lane ${(2 * V.track.half).toFixed(0)} cm wide (${src})`);
+  if (r === 'lap') {
+    log('ap', `vision: lap ${V.laps.length} in ${V.laps[V.laps.length - 1].toFixed(2)} s`);
+    if (p.visLaps && lap.running) lapStartStop();
+  }
+  return r;
+}
+
+function visionConnect() {
+  clearTimeout(vis.timer);
+  const old = vis.sock;
+  vis.sock = null;
+  try { old?.close(); } catch { /* already closed */ }
+  const url = String(p.visUrl || '').trim();
+  if (!url || !V) return;
+  let s;
+  try { s = /^wss?:/i.test(url) ? new WebSocket(url) : new EventSource(url); } catch (e) { log('err', `vision feed ${url}: ${e.message}`); return; }
+  vis.sock = s;
+  s.onopen = () => { vis.errLogged = false; log('ap', 'vision feed connected: ' + url); };
+  s.onmessage = (e) => { if (typeof e.data === 'string') visionIngest(e.data, 'net'); };
+  s.onerror = () => { if (vis.sock === s && !vis.errLogged) { vis.errLogged = true; log('err', `vision feed ${url}: can't connect, retrying`); } };
+  if (typeof s.send === 'function') s.onclose = () => { if (vis.sock === s) vis.timer = setTimeout(visionConnect, 2000); }; // EventSource retries by itself
+}
+
+// Car model for predicting the pose: Tune values, with the left/right balance from the fit.
+// Car model for predicting the pose: learned values, with the left/right balance from the fit.
+function visModel() {
+  const g = lv('vmax') / Math.max(1, 100 - lv('deadband'));
+  const e = V.est;
+  const m = e && e.ok ? (e.gL + e.gR) / 2 : 0;
+  return { gL: m ? (g * e.gL) / m : g, gR: m ? (g * e.gR) / m : g, d0: lv('deadband'), W: lv('wheelbase'), d: lv('delay') };
+}
+
+// s.vis: the pose predicted to when the next command lands (lead), lane error, bend ahead, and the learned
+// car model (s.vis.model) for turning wheel speeds into motor values. Null without a feed.
+function visState(t, lead = lv('delay')) {
+  if (!V || !V.poses.length) return null;
+  try {
+    const st = V.state(t, { lead, timeout: p.visTimeout, look: p.visLook, model: visModel() });
+    if (st) st.model = { vmax: lv('vmax'), deadband: lv('deadband'), wheelbase: lv('wheelbase'), delay: lv('delay') };
+    return st;
+  } catch (e) {
+    return null;
+  }
+}
+
+function visCalTick() {
+  if (!V) return;
+  const t = now();
+  try {
+    if (V.dirty && t - vis.calAt > 2000) { vis.calAt = t; V.fit({ d0: lv('deadband'), W: lv('wheelbase'), d: lv('delay') }); }
+    if (!V.est?.ok) return;
+    if (p.visCal === 'auto' && t - vis.applyAt > 3000) {
+      vis.applyAt = t;
+      visApply(vis.propose(V.est, learned, p.trim, { maxStep: p.visMaxStep }), 'learned');
+    } else if (p.visCal === 'suggest' && t - vis.sugAt > 15000) {
+      const ch = vis.propose(V.est, learned, p.trim, { full: true });
+      const key = JSON.stringify(ch);
+      if (Object.keys(ch).length && key !== vis.sugKey) {
+        vis.sugAt = t;
+        vis.sugKey = key;
+        log('ap', `vision suggests ${Object.entries(ch).map(([k, v]) => `${k} ${lv(k)} → ${v}`).join(', ')} (${V.est.n} samples). Tune → Vision → Apply fit.`);
+      }
+    }
+  } catch (e) {
+    log('err', 'vision calibration: ' + e.message);
+  }
+}
+
+// Stores learned values (rrLearn.v1). The sliders are never touched.
+function visApply(ch, why) {
+  const keys = Object.keys(ch);
+  if (!keys.length) return;
+  log('ap', `vision ${why}: ${keys.map((k) => `${k} ${lv(k)} → ${ch[k]}`).join(', ')}`);
+  learnWrite(ch);
+}
+
+function visReset() {
+  log('ap', `vision: learned values reset (were ${LEARN_MINE.filter((k) => k in learned).map((k) => `${k} ${learned[k]}`).join(', ') || 'none'})`);
+  learnWrite({}, true);
+}
+
+function renderVision(t) {
+  const st = visState(t, 0);
+  const sign = (v, n = 0) => (v >= 0 ? '+' : '') + v.toFixed(n);
+  $('vCam').textContent = !st ? '–' : st.fresh ? `${st.hz} fps` : 'lost';
+  $('vLane').textContent = st && st.fresh && st.e != null ? `${sign(st.e)} cm` : '–';
+  if (ui.tab !== 'tune' || t - vis.renderAt < 300) return;
+  vis.renderAt = t;
+  $('visStatus').textContent = !st ? 'No camera feed yet (VISION.md says how to send one).'
+    : `${vis.src} · ${st.hz} fps · ${st.age.toFixed(0)} ms late${st.fresh ? '' : ' (lost)'} · at ${st.raw.x.toFixed(0)},${st.raw.y.toFixed(0)} cm ` +
+      `${((st.raw.h * 180) / Math.PI).toFixed(0)}° · ${st.v.toFixed(0)} cm/s` +
+      (st.e != null ? ` · lane ${sign(st.e)} cm · ${(st.s / st.len * 100).toFixed(0)}% round` : ' · no track outline') +
+      (V.laps.length ? ` · laps ${V.laps.map((x) => x.toFixed(1)).join(' ')}` : '');
+  const e = V.est;
+  const q = (ok) => (ok ? '' : ' (assumed)');
+  $('visFit').textContent = !e || !e.ok ? `Collecting: ${V.samples.length}/40 samples. Drive around in any mode while the camera sees the car.`
+    : `Fit from ${e.n} samples: trim ${sign(e.trim, 1)} in total${e.trimOk ? '' : ' (unsure)'} · ${e.vmax.toFixed(0)} cm/s at 100 · ` +
+      `deadband ${e.d0}${q(e.ident.d0)} · wheelbase ${e.W.toFixed(1)} cm${q(e.ident.W)} · delay ${e.d} ms${q(e.ident.d)} · ` +
+      `off by ${e.rmsV.toFixed(1)} cm/s, ${e.rmsW.toFixed(2)} rad/s`;
+  $('visLearned').textContent = `Learned${p.visCal === 'off' ? ' (ignored, Self-calibrate is off)' : ''}: trim ${sign(lv('trimLearned'), 1)} on top of the slider's ${sign(p.trim, 1)} · ` +
+    `${lv('vmax')} cm/s at 100 · deadband ${lv('deadband')} · wheelbase ${lv('wheelbase')} cm · delay ${lv('delay')} ms${learned.at ? '' : ' (defaults, nothing learned yet)'}`;
 }
 
 // ---------------------------------------------------------------- driving
@@ -398,9 +581,12 @@ function toMotor(f) {
   return Math.sign(f) * (p.minSpeed + (p.maxSpeed - p.minSpeed) * a);
 }
 
+// Trim slider plus the trim learned from the camera (0 until something is learned, or with Self-calibrate off).
+const learnedTrim = () => (p.visCal === 'off' ? 0 : clamp(lv('trimLearned'), -8, 8));
 function trimmed([l, r]) {
-  const L = Math.round(clamp(l * (1 + p.trim / 100), -100, 100));
-  const R = Math.round(clamp(r * (1 - p.trim / 100), -100, 100));
+  const tr = p.trim + learnedTrim();
+  const L = Math.round(clamp(l * (1 + tr / 100), -100, 100));
+  const R = Math.round(clamp(r * (1 - tr / 100), -100, 100));
   return [L, R];
 }
 
@@ -449,6 +635,7 @@ function drive(t = now()) {
   S.lastMotor = cmd;
   S.lastMotorAt = t;
   S.out = [l, r];
+  if (V) V.command(t, l, r);
   link.setMotor(cmd);
 }
 
@@ -458,6 +645,7 @@ function emergencyStop(why) {
   S.out = [0, 0];
   S.lastMotor = 'S';
   S.lastMotorAt = now();
+  if (V) V.command(S.lastMotorAt, 0, 0);
   if (link.connected) link.stopNow();
   if (why) log('ap', 'STOP: ' + why);
 }
@@ -540,7 +728,7 @@ function straightTest() {
   if (!link.connected) { log('err', 'Straight test: connect first'); return; }
   setMode('manual');
   S.testDrive = now() + p.testMs;
-  log('ap', `Straight test: speed ${p.testSpeed} for ${p.testMs} ms, trim ${p.trim}`);
+  log('ap', `Straight test: speed ${p.testSpeed} for ${p.testMs} ms, trim ${p.trim}${learnedTrim() ? ` + learned ${learnedTrim()}` : ''}`);
 }
 
 async function copyLog() {
@@ -614,6 +802,7 @@ function restartTick() {
 function tick() {
   const t = now();
   pollGamepad();
+  if (V) pollCamera();
   if (!link.connected) return;
   drive(t);
   if (S.testing) return;
@@ -836,13 +1025,27 @@ async function tryAutoReconnect() {
 }
 
 async function startDemo() {
-  const { SimTransport } = await import(`./sim.js?t=${T}`);
+  const { SimTransport, trackCenter } = await import(`./sim.js?t=${T}`);
   const canvas = $('sim');
   canvas.classList.remove('hidden');
-  const sim = new SimTransport((text) => link.onText(text), canvas, () => ({ track: p.simTrack, latency: p.simLatency, link: p.simLink }));
+  const sim = new SimTransport((text) => link.onText(text), canvas, () => ({ track: p.simTrack, latency: p.simLatency, link: p.simLink, skew: p.simSkew }));
   transport = sim;
   link.t = sim;
   setState('connected');
+  // Fake camera: the simulated car's pose 30 times a second, 80 ms late, with a little noise, through the
+  // same path as a real feed. The track outline goes first, and again whenever the demo track changes.
+  let sentTrack = '';
+  const cam = setInterval(() => {
+    if (!sim.connected) { clearInterval(cam); return; }
+    if (!p.simVision || !V) return;
+    if (sentTrack !== sim.trackName) {
+      sentTrack = sim.trackName;
+      visionIngest({ type: 'track', ...trackCenter(sim.trackName) }, 'demo');
+    }
+    const n = () => Math.random() - 0.5;
+    const msg = { type: 'pose', x: sim.x + n(), y: sim.y + n(), h: sim.th + n() * 0.03, t: Date.now() };
+    setTimeout(() => visionIngest(msg, 'demo'), 80);
+  }, 33);
 }
 
 let wl = null;
@@ -866,6 +1069,8 @@ function buildForm(container, group) {
         lab.innerHTML = `<input type="checkbox" data-k="${x.k}"> ${x.label}`;
       } else if (x.type === 'select') {
         lab.innerHTML = `${x.label} <select data-k="${x.k}">${x.options.map((o) => `<option>${o}</option>`).join('')}</select>${help}`;
+      } else if (x.type === 'text') {
+        lab.innerHTML = `${x.label}<input type="text" data-k="${x.k}" autocapitalize="off" autocorrect="off" spellcheck="false" style="width:100%">${help}`;
       } else {
         lab.innerHTML = `${x.label}<div class="slider"><input type="range" data-k="${x.k}" min="${x.min}" max="${x.max}" step="${x.step}">` +
           `<input type="number" data-k="${x.k}" min="${x.min}" max="${x.max}" step="${x.step}" inputmode="decimal"></div>${help}`;
@@ -892,7 +1097,7 @@ function onParamInput(e) {
   if (!def) return;
   let v;
   if (def.type === 'bool') v = el.checked;
-  else if (def.type === 'select') v = el.value;
+  else if (def.type === 'select' || def.type === 'text') v = el.value;
   else { v = parseFloat(el.value); if (Number.isNaN(v)) return; v = clamp(v, def.min, def.max); }
   p[k] = v;
   saveParams();
@@ -902,6 +1107,7 @@ function onParamInput(e) {
 
 function onParamChanged(k) {
   if (k === 'tickMs') restartTick();
+  if (k === 'visUrl') { clearTimeout(vis.urlTimer); vis.urlTimer = setTimeout(visionConnect, 800); }
   if (k === 'layout') applyLayout();
   if (k === 'fx') {
     $('btnFx').textContent = p.fx ? 'FX: on' : 'FX: off';
@@ -1006,6 +1212,7 @@ function render(ts) {
   $('vEnv').textContent = S.tel.light != null || S.tel.temp != null ? `${S.tel.light ?? '–'} · ${S.tel.temp ?? '–'}°C` : '–';
   if (lap.running) $('lapTime').textContent = ((t - lap.start) / 1000).toFixed(2);
   if (ui.tab === 'pilot') drawLineHist(t);
+  if (V) try { renderVision(t); } catch { /* never let the vision panel stop the log */ }
   renderLog();
 }
 
@@ -1064,6 +1271,13 @@ function init() {
     '<div class="row"><button class="btn primary" id="btnStraight">Straight test</button>' +
     '<span class="muted small">Drives straight, then stops. Adjust trim until the car tracks straight.</span></div>');
   $('btnStraight').onclick = straightTest;
+  $('tuneForm').querySelector('fieldset[data-group="Vision"] legend').insertAdjacentHTML('afterend',
+    '<div id="visStatus" class="muted small">Vision module loading…</div><div id="visFit" class="small"></div><div id="visLearned" class="small"></div>' +
+    '<div class="row"><button class="btn primary" id="btnVisApply">Apply fit</button><button class="btn" id="btnVisReset">Reset learning</button>' +
+    '<button class="btn" id="btnVisForget">Forget samples</button></div>');
+  $('btnVisApply').onclick = () => { if (V && V.est?.ok) visApply(vis.propose(V.est, learned, p.trim, { full: true }), 'fit applied'); else log('ap', 'vision: no fit yet'); };
+  $('btnVisReset').onclick = visReset;
+  $('btnVisForget').onclick = () => { if (V) { V.forget(); log('ap', 'vision: calibration samples cleared'); } };
   $('btnLinkTest').onclick = linkTest;
   $('btnCopyLog').onclick = copyLog;
   buildForm($('apParams'), 'Autopilot');
@@ -1147,6 +1361,7 @@ function init() {
   renderModeUi();
   restartTick();
   requestAnimationFrame(render);
+  loadVision();
   loadScripts(true);
   probeBuild();
   setInterval(() => { if (!document.hidden) probeBuild(); }, 20000);
@@ -1161,6 +1376,9 @@ function init() {
 }
 
 // Exposed for debugging from the Log tab / tests.
-window.rr = { p, S, link, log, arm, disarm, emergencyStop, startDemo, linkTest, straightTest, get transport() { return transport; } };
+window.rr = {
+  p, S, link, log, arm, disarm, emergencyStop, startDemo, linkTest, straightTest, get transport() { return transport; },
+  vision: { ingest: (m) => visionIngest(m, 'api'), state: () => visState(now(), 0), reset: visReset, get learned() { return learned; }, get V() { return V; } },
+};
 
 init();

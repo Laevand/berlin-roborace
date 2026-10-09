@@ -20,6 +20,7 @@ To try it without a robot, add `?demo` to the URL. That gives you a simulated ca
 | --- | --- | --- |
 | Tuning | **Tune** tab sliders: speed, deadband, trim, steering feel, autopilot speeds. Changes apply live while you drive and are saved on the phone. | 0 s |
 | Autopilot logic | **Pilot** tab: edit the JS in place and tap **Apply**. It hot-swaps without disconnecting. | ~10 s |
+| Camera self-calibration | Tune → Vision → Self-calibrate `auto`: with a vision feed ([VISION.md](VISION.md)), trim and the car model are learned while you drive and applied on top of your sliders. **Reset learning** clears them, and `off` ignores them. | 0 s |
 | Agent-written autopilot | Ask Claude Code in the phone app to change `autopilot/*.js`. It pushes to `main`, then you tap **Pull from repo** in the Pilot tab. The connection stays up. | ~1 min |
 | Agent-written app change | Claude pushes to `main` and a **⬆ New build** button appears in the header. Tap it, then tap **Connect** again. | ~1–2 min |
 
@@ -52,7 +53,8 @@ To try it without a robot, add `?demo` to the URL. That gives you a simulated ca
 | `index.html` | Stable loader shell that cache-busts everything else. Don't edit it. |
 | `ui.html`, `style.css` | Markup and styling. |
 | `app.js` | BLE link, command queue, control loop, inputs, lights, telemetry, autopilot engine, Tune form. |
-| `sim.js` | Demo simulator, a fake robot speaking the same protocol. |
+| `sim.js` | Demo simulator, a fake robot speaking the same protocol, plus a fake camera feed. |
+| `adapt.js` | Vision feedback in the control loop: camera pose → `s.vis` for scripts, self-calibration of trim/speed/deadband/wheelbase/delay, laps. Feed format in [VISION.md](VISION.md). |
 | `autopilot/*.js` | Autopilot scripts, listed in `autopilot/index.json`. |
 | `vision.html`, `vision*.js` | Experimental camera page: finds the lane and the robot in the phone camera. `vision.html?demo` scores it against a synthetic camera. Not used for driving yet. |
 | `tools/smoke.mjs` | Headless test. Run `node tools/smoke.mjs` before pushing. |

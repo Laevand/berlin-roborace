@@ -178,6 +178,105 @@ try {
   for (let t = 0; t < 30000; t += 500) rtts.add(lm.rtt(t, 'varying', 70));
   check(rtts.has(70) && rtts.has(420) && new LinkModel().rtt(0, 'steady', 70) === 70, 'varying link flips between fast and slow');
 
+  // Vision feedback (adapt.js): message formats, lane geometry, self-calibration and prediction, in virtual time.
+  const { Adapter, Track, parseMessage, proposeChanges } = await import('../adapt.js');
+  const pm = parseMessage(JSON.stringify({ type: 'poses', yDown: true, scale: 0.5, robots: [{ id: 'other', x: 0, y: 0, h: 0 }, { id: 'TUPAZ', x: 10, y: 20, hdeg: 90, t: 5 }] }));
+  const vp = new Adapter();
+  const picked = vp.pick(pm.poses, 'tupaz');
+  check(picked && picked.x === 5 && picked.y === -10 && Math.abs(picked.h + Math.PI / 2) < 1e-9 && picked.t === 5 && parseMessage('nope') === null,
+    'vision messages: robot picked by id, scale, y-down and degrees converted');
+  const tk = new Track([[0, 0], [100, 0], [100, 100], [0, 100]], 10);
+  const lc = tk.locate(50, 4);
+  check(Math.abs(lc.e - 4) < 1e-9 && Math.abs(lc.s - 50) < 1e-9 && tk.len === 400, `track: left of the center line is +e (${lc.e}, s ${lc.s})`);
+  // A car whose right wheel is 4% stronger, driven with random commands, seen by a 30 fps camera 80 ms late.
+  const calCar = new SimCar(() => ({ track: 'rally', skew: 4 }));
+  calCar.x = 0; calCar.y = 0; calCar.th = 0;
+  const Vc = new Adapter();
+  let seed = 7;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const ev = [];
+  let next = 0, predErr = 0, predN = 0;
+  for (let t = 0; t < 40000; t += 5) {
+    if (t >= next) {
+      const m = 15 + rnd() * 65, st = (rnd() - 0.5) * (rnd() < 0.4 ? 0 : 1);
+      const l = Math.round(m * (1 + st)), r = Math.round(m * (1 - st));
+      Vc.command(t, l, r);
+      ev.push([t + 40, () => { calCar.l = l; calCar.r = r; }]);
+      next = t + 300 + rnd() * 600;
+    }
+    ev.sort((a, b) => a[0] - b[0]);
+    while (ev.length && ev[0][0] <= t) ev.shift()[1]();
+    calCar.step(0.005);
+    if (t % 35 === 0) {
+      const msg = { type: 'pose', x: calCar.x + rnd() - 0.5, y: calCar.y + rnd() - 0.5, h: calCar.th + (rnd() - 0.5) * 0.03, t: 1e12 + t };
+      ev.push([t + 80, () => Vc.ingest(msg, t + 80, 1e12 + t + 80)]);
+    }
+    if (t > 20000 && t % 1000 === 0 && Vc.est?.ok) {
+      // Where is the car now, from a pose 80 ms old plus the commands sent since?
+      const g = Vc.est;
+      const P = Vc.predict(Vc.poses[Vc.poses.length - 1], t, { gL: g.gL, gR: g.gR, d0: g.d0, W: g.W, d: g.d });
+      predErr += Math.hypot(P.x - calCar.x, P.y - calCar.y); predN++;
+    }
+    if (t === 20000) Vc.fit({ d0: 25, W: 9, d: 150 });
+  }
+  const est = Vc.fit({ d0: 25, W: 9, d: 150 });
+  const wantTrim = (100 * 0.08 * (est.mref - 20)) / (est.mref * 2);
+  check(est.ok && est.trimOk && Math.abs(est.trim - wantTrim) < 0.8 && Math.abs(est.vmax - 50) < 7 && Math.abs(est.W - 9) < 1.5 && est.d >= 50 && est.d <= 300,
+    `self-calibration finds a crooked car's trim (${est.trim?.toFixed(2)} vs ${wantTrim.toFixed(2)}), speed ${est.vmax?.toFixed(0)} cm/s, wheelbase ${est.W?.toFixed(1)}, delay ${est.d} ms`);
+  check(predN > 10 && predErr / predN < 3, `vision predicts the car's current position from a late frame (${(predErr / Math.max(1, predN)).toFixed(1)} cm off on average)`);
+  const ch = proposeChanges(est, {}, 0, { maxStep: 1 });
+  const chT = proposeChanges(est, {}, 2, { full: true });
+  check(ch.trimLearned === 1 && Math.abs(chT.trimLearned - (est.trim - 2)) <= 0.25 && proposeChanges({ ok: false }, {}).trimLearned === undefined,
+    `learning moves trim in bounded steps, on top of the slider (${JSON.stringify(ch)}, slider 2 → learned ${chT.trimLearned})`);
+  const v1 = new Adapter();
+  check(v1.ingest({ v: 1, seq: 1, t: 1000, robot: { x: 5, y: 6, h: 1, sigma: 4 }, conf: 0.9 }, 1050, 0) === 'pose' && v1.poses[0].t === 1000 &&
+    v1.ingest({ v: 1, seq: 2, t: 1100, robot: null, conf: 0, note: 'no-robot' }, 1150, 0) === null, 'window.__rrVision v1 frames are read on the performance.now() clock');
+
+  // Vision pilot: a camera that puts the car far off the lane while the line sensors see the lane is ignored.
+  const vpFn = new Function('s', 'p', 'mem', 'ctx', fs.readFileSync(path.join(root, 'autopilot/vision-pilot.js'), 'utf8'));
+  const vpP = { apBase: 60, minSpeed: 25, apTurn: 15, apHard: -35, apCurve: 10, apCurveDecay: 1500, visGrip: 250 };
+  const vpMem = {}, vpLog = [];
+  const wrongCam = { fresh: true, e: 60, half: 10, ahead: [5, 15], kAhead: 0, model: { vmax: 50, deadband: 22, wheelbase: 9, delay: 150 } };
+  let vpOut = null;
+  for (let t = 0; t <= 1500; t += 60) vpOut = vpFn({ t, dt: 60, code: 0, L: false, R: false, vis: wrongCam }, vpP, vpMem, { log: (m) => vpLog.push(m) });
+  const camRight = vpFn({ t: 1560, dt: 60, code: 0, L: false, R: false, vis: { ...wrongCam, e: 0, distrust: 1 } }, vpP, vpMem, { log: () => {} });
+  check(vpOut[0] === 60 && vpOut[1] === 60 && vpLog.some((m) => m.includes('ignoring the camera')) && camRight[0] === 60 && vpMem.mode === 'line',
+    `vision pilot drives by the line sensors when the camera disagrees (${vpOut}; ${vpLog.slice(-1)[0] || 'no log'})`);
+
+  // In the app: demo camera -> s.vis, auto calibration learns trim (sliders untouched), Reset, Vision pilot on the rally track.
+  await page.evaluate(() => Object.assign(window.rr.p, { simTrack: 'rally', simSkew: 5, visCal: 'auto', simVision: true }));
+  await pickScript('vision-pilot.js');
+  await page.evaluate(() => { window.rr.transport.reset(); window.rr.vision.V.forget(); });
+  await page.click('#btnGo');
+  await page.waitForTimeout(1500);
+  const visSt = await page.evaluate(() => { const v = window.rr.vision.state(); return v && { fresh: v.fresh, e: v.e, half: v.half, track: !!window.rr.vision.V.track }; });
+  check(visSt && visSt.fresh && visSt.track && Math.abs(visSt.e) < visSt.half, `demo camera feeds the vision state (${JSON.stringify(visSt)})`);
+  await page.waitForTimeout(9000);
+  const visRun = await page.evaluate(() => {
+    const t = window.rr.transport, n = t.constructor.nearestRally(t.x, t.y);
+    const L = JSON.parse(localStorage.getItem('rrLearn.v1') || '{}');
+    return { armed: window.rr.S.armed, off: t.offTime, idx: n.i, slider: window.rr.p.trim, learned: L.trimLearned, cam: window.rr.S.mem.mode === 'cam' };
+  });
+  await page.click('#btnStop');
+  check(visRun.armed && visRun.cam && visRun.off < 0.5 && visRun.idx > 20, `vision pilot drives the rally track from the camera (${JSON.stringify(visRun)})`);
+  check(visRun.slider === 0 && visRun.learned > 0 && visRun.learned <= 5, `self-calibration learns trim for a car that drifts left, slider untouched (learned ${visRun.learned})`);
+  await page.evaluate(() => { localStorage.setItem('rrLearn.v1', JSON.stringify({ ...JSON.parse(localStorage.getItem('rrLearn.v1')), other: 7 })); window.rr.vision.reset(); });
+  check(await page.evaluate(() => { const L = JSON.parse(localStorage.getItem('rrLearn.v1')); return L.trimLearned === undefined && L.other === 7; }), 'Reset learning clears the learned values and keeps other scripts\' keys');
+  await page.evaluate(() => { window.__rrVision = { v: 1, seq: 1, t: performance.now() - 50, robot: { x: 3, y: 4, h: 0, sigma: 4 }, conf: 0.9 }; });
+  await page.waitForTimeout(200);
+  check(await page.evaluate(() => window.rr.vision.V.poses.some((b) => b.x === 3 && b.y === 4)), 'in-page camera (window.__rrVision) reaches the control loop');
+  await page.evaluate(() => { delete window.__rrVision; });
+  await page.evaluate(() => { window.rr.p.simVision = false; });
+  await page.waitForTimeout(300); // let frames already in flight arrive
+  const n0 = await page.evaluate(() => window.rr.vision.V.n);
+  await page.evaluate(() => window.postMessage({ rrVision: { type: 'pose', x: 1, y: 2, h: 0, age: 0 } }, location.origin));
+  await page.waitForTimeout(150);
+  await page.evaluate(() => new BroadcastChannel('rr-vision').postMessage({ type: 'pose', x: 1, y: 3, h: 0, age: 0 }));
+  await page.waitForTimeout(150);
+  check(await page.evaluate((n) => window.rr.vision.V.n === n + 2, n0), 'vision feed accepted from postMessage and BroadcastChannel');
+  await page.evaluate(() => Object.assign(window.rr.p, { simTrack: 'lane', simSkew: 0, visCal: 'suggest', simVision: true }));
+  await pickScript('lane.js');
+
   await page.click('#tabSeg button[data-tab=pilot]');
   await page.fill('#apCode', 'return [ broken');
   await page.click('#apApply');
