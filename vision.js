@@ -11,6 +11,7 @@ const SLIDERS = [
   ['hueHi', 'Lane hue to', 0, 360, 1],
   ['satMin', 'Lane min saturation', 0, 1, 0.01],
   ['valMin', 'Lane min brightness', 0, 1, 0.01],
+  ['white', 'White lines count as lane (1 = yes, 0 = no: lines inside the S-bend become walls)', 0, 1, 1],
   ['whiteVal', 'White edge min brightness', 0, 1, 0.01],
   ['whiteSat', 'White edge max saturation', 0, 1, 0.01],
   ['closeK', 'Gap closing (lane widths)', 0.05, 0.5, 0.05],

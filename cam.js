@@ -5,6 +5,11 @@ const PROC_W = 160;
 const cam = { running: false };
 let Vision, VDEFAULTS, video, canvas, g, proc, pg, vis, w = 0, h = 0, img, res = null, last = 0;
 
+// the Vision page's saved settings (rr.vision) apply here too, so what looks right there drives here
+function params() {
+  try { return { ...VDEFAULTS, ...JSON.parse(localStorage.getItem('rr.vision') || '{}') }; } catch { return VDEFAULTS; }
+}
+
 export function camState() { return window.__rrCam || null; }
 
 function ensureDom() {
@@ -75,7 +80,7 @@ function loop(ts) {
   last = ts;
   pg.drawImage(video, 0, 0, w, h);
   const data = pg.getImageData(0, 0, w, h).data;
-  try { res = vis.process(data, ts, VDEFAULTS); } catch (e) { res = null; return; }
+  try { res = vis.process(data, ts, params()); } catch (e) { res = null; return; }
   const ok = res && res.found && res.offset != null && res.steer != null;
   window.__rrCam = {
     t: performance.now(), found: !!ok, mine: res ? res.mine != null : false,
