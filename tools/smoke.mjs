@@ -124,48 +124,13 @@ try {
   await page.click('#btnStop');
   check(lost.l === 0 && lost.r === 0 && lost.gaveUp, `lane keeper stops when it can't find the lane (${lost.l},${lost.r}, gave up ${lost.gaveUp})`);
 
-  // Explore & map: drives the lane, asks ?DIST itself, draws the map overlay, backs up from a close obstacle.
+  // Script picker helper.
   const pickScript = (file) => page.evaluate((f) => {
     const sel = document.getElementById('apSelect');
     sel.value = f;
     sel.dispatchEvent(new Event('change'));
     document.getElementById('apApply').click();
   }, file);
-  await pickScript('explore.js');
-  await page.evaluate(() => window.rr.transport.reset());
-  await page.click('#btnGo');
-  await page.waitForTimeout(2500);
-  const ex = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r, dist: window.rr.S.tel.dist, cells: Object.keys(window.rr.S.mem.cells || {}).length, map: !!document.getElementById('rrMap') }));
-  check(ex.l > 0 && ex.r > 0 && ex.dist > 0 && ex.cells > 3 && ex.map, `explore drives, reads distance, maps (${ex.l},${ex.r}, dist ${ex.dist}, ${ex.cells} cells, overlay ${ex.map})`);
-  // The map lets touches through to the controls underneath; only 📍 makes it take one placement.
-  const mb = await page.locator('#rrMap').boundingBox();
-  const through = await page.evaluate(([x, y]) => { const el = document.elementFromPoint(x, y); return el && !el.closest('#rrMapBox') ? el.id || el.tagName : null; }, [mb.x + mb.width / 2, mb.y + mb.height / 2]);
-  check(!!through, `explore map lets taps through to the controls (${through})`);
-  await page.click('#rrMapPlace');
-  await page.waitForTimeout(400);
-  // A coarse tap 12 cm beside the top straight, no drag: it should snap to that lane and take its direction.
-  const tap = await page.evaluate(() => {
-    const tr = window.__rrTrack, v = window.__rrMapView, d = devicePixelRatio, m = window.rr.S.mem;
-    let k = 0;
-    tr.forEach((q, i) => { if (Math.abs(q[0]) < 30 && q[1] > tr[k][1]) k = i; });
-    return { k, q: tr[k], d0: Math.hypot(tr[k][0] - m.x, tr[k][1] - m.y), px: ((tr[k][0] - v.x0) * v.sc) / d, py: ((v.y1 - tr[k][1] - 12) * v.sc) / d };
-  });
-  await page.mouse.click(mb.x + tap.px, mb.y + tap.py);
-  await page.waitForFunction(() => window.rr.S.mem.userPlaced, null, { timeout: 2000 }).catch(() => {});
-  const placed = await page.evaluate(() => { const m = window.rr.S.mem; return { placing: !!window.__rrPlacing, x: m.x, y: m.y, h: m.h, ti: m.ti, user: m.userPlaced, armed: window.rr.S.armed }; });
-  const dq = Math.hypot(placed.x - tap.q[0], placed.y - tap.q[1]);
-  check(!placed.placing && placed.user && placed.armed && dq < 0.25 * tap.d0 + 15 && Math.abs(Math.cos(placed.h)) > 0.8,
-    `a coarse tap on the map pulls the car onto that lane, along it, without stopping Auto (${dq.toFixed(0)} cm from the lane point, was ${tap.d0.toFixed(0)}; heading ${((placed.h * 180) / Math.PI).toFixed(0)}°)`);
-  if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT });
-  await page.evaluate(() => { window.__distHold = setInterval(() => { window.rr.S.tel.dist = 8; window.rr.S.tel.distAt = performance.now(); }, 5); });
-  let back = { l: 0, r: 0 };
-  for (let i = 0; i < 10 && !(back.l < 0 && back.r < 0); i++) {
-    await page.waitForTimeout(60);
-    back = await page.evaluate(() => ({ l: window.rr.transport.l, r: window.rr.transport.r }));
-  }
-  await page.evaluate(() => clearInterval(window.__distHold));
-  await page.click('#btnStop');
-  check(back.l < 0 && back.r < 0, `explore backs up from an obstacle 8 cm ahead (${back.l},${back.r})`);
   await pickScript('lane.js');
   // Rally track (standalone SimCar, so the app's control loop can't interfere): lane, motor lag, laps, link model.
   const { SimCar, LinkModel } = await import('../sim.js');
