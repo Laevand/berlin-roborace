@@ -30,7 +30,7 @@ Win the Next App Robot Rally ([CONTEST.md](https://github.com/droidconHQ/CuteBot
 ## Autonomy (map + vision + self-correction)
 See [docs/AUTONOMY-ARCHITECTURE.md](docs/AUTONOMY-ARCHITECTURE.md) for layers, owners and the `window.__rrVision` / `fix()` contracts.
 
-## Vision feedback in the control loop (branch `claude/vision-control-loop` until merged)
+## Vision feedback in the control loop
 This is layer L3 of the architecture doc. `adapt.js` (no DOM) takes the camera's `window.__rrVision` v1 frames, or messages ([VISION.md](VISION.md)), and fits trim, speed at motor 100, deadband, wheelbase and command delay from pose vs. sent motor commands. Results are learned values in `rrLearn.v1`, applied on top of the sliders; sliders are never written. Tune → Vision → Self-calibrate: `off` ignores them, `suggest` (default) logs them and **Apply fit** stores them, `auto` learns in bounded steps, and **Reset learning** clears them. Scripts get `s.vis` (pose predicted to when the command lands, lane error, look-ahead point, learned model) and `s.vision` (raw frame). `autopilot/vision-pilot.js` is pure pursuit on `s.vis`. It falls back to the lane keeper when the camera is missing or puts the car far off the lane; a camera problem never stops the car by itself. In the sim with the camera, it laps with 0 s off the lane at Base speed 80, including on the varying link (the lane keeper fails there at 40). It fails at 100 on the varying link; speed should adapt to the link delay (open). Not yet tried with a real camera or robot.
 
 ## Simulator
