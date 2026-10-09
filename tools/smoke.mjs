@@ -288,6 +288,22 @@ try {
     if (cam === 'follow' && beacon) check(taps === 0, 'vision picks the beacon robot as mine without a tap');
   }
   {
+    // the real mat (photo, Fri): S-bend strands only half a lane apart, a robot on one strand, a green cushion off the mat
+    const vw = 200, vh = 180, img = new Uint8ClampedArray(vw * vh * 4), vis = new Vision(vw, vh);
+    const put = (x0, y0, x1, y1, c) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) img.set([...c, 255], (y * vw + x) * 4); };
+    put(0, 0, vw, vh, [20, 20, 24]);
+    for (const x of [30, 66, 102, 138]) put(x, 20, x + 24, 150, [225, 80, 190]);   // strands 24 px wide, gaps 12 px
+    put(30, 20, 90, 44, [225, 80, 190]); put(66, 126, 126, 150, [180, 70, 210]); put(102, 20, 162, 44, [150, 70, 220]); // U-turns
+    put(108, 84, 120, 96, [30, 30, 34]);                                         // a robot on the third strand
+    put(184, 160, 194, 170, [90, 230, 110]);                                     // green cushion, far from the lane
+    let r;
+    for (let k = 0; k < 10; k++) r = vis.process(img, k * 33, VDEFAULTS);
+    const gapOpen = [[60, 90], [96, 70], [132, 90]].every(([x, y]) => !vis.drive[y * vw + x]);
+    check(gapOpen && vis.drive[90 * vw + 114], `vision keeps the S-bend's narrow gaps open and fills the robot (W ${r.W.toFixed(1)})`);
+    check(r.tracks.length === 1 && Math.hypot(r.tracks[0].x - 114, r.tracks[0].y - 90) < 3 && r.mine == null,
+      `vision boxes the robot and ignores green off the lane (${r.tracks.map((q) => `${q.x.toFixed(0)},${q.y.toFixed(0)}`).join(' ')})`);
+  }
+  {
     const m = new Uint8Array(20 * 20);
     for (let y = 5; y < 15; y++) for (let x = 5; x < 15; x++) m[y * 20 + x] = 1;
     const seg = contour(m, 20, 20);

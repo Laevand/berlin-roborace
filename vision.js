@@ -16,7 +16,8 @@ const SLIDERS = [
   ['valMin', 'Lane min brightness', 0, 1, 0.01],
   ['whiteVal', 'White edge min brightness', 0, 1, 0.01],
   ['whiteSat', 'White edge max saturation', 0, 1, 0.01],
-  ['closeK', 'Gap closing (lane widths)', 0.1, 0.8, 0.05],
+  ['closeK', 'Gap closing (lane widths)', 0.05, 0.5, 0.05],
+  ['notchK', 'Robot notch closing (lane widths)', 0.1, 0.8, 0.05],
   ['robotMin', 'Robot min size (W²)', 0.01, 0.5, 0.01],
   ['robotMax', 'Robot max size (W²)', 0.3, 3, 0.1],
   ['bHueLo', 'Beacon hue from', 0, 360, 1],
@@ -26,7 +27,13 @@ const SLIDERS = [
   ['colorTol', 'Taught color tolerance', 0.01, 0.2, 0.005],
 ];
 const DEFAULTS = { ...VDEFAULTS, procW: 240, view: 'outline', cam: 'follow', center: 0 };
-const load = () => { try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('rr.vision') || '{}') }; } catch { return { ...DEFAULTS }; } };
+const SETTINGS_V = 2; // bump when defaults change in a way old saved settings would undo
+const load = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem('rr.vision') || '{}');
+    return saved.v === SETTINGS_V ? { ...DEFAULTS, ...saved } : { ...DEFAULTS, v: SETTINGS_V };
+  } catch { return { ...DEFAULTS, v: SETTINGS_V }; }
+};
 const p = load();
 if (!['outline', 'mask', 'raw'].includes(p.view)) p.view = 'outline';
 const save = () => { try { localStorage.setItem('rr.vision', JSON.stringify(p)); } catch { /* private mode */ } };
@@ -106,7 +113,7 @@ if ($('vCam')) $('vCam').onchange = (e) => { p.cam = e.target.value; save(); set
 if ($('vNoBeacon')) $('vNoBeacon').onchange = () => setup();
 $('vFreeze').onclick = () => { frozen = !frozen; $('vFreeze').classList.toggle('on', frozen); $('vFreeze').textContent = frozen ? 'Frozen' : 'Freeze'; };
 $('vReset').onclick = () => { vis?.reset(); Object.keys(stats).forEach((k) => (stats[k] = 0)); };
-$('vDefaults').onclick = () => { Object.assign(p, DEFAULTS); save(); buildSliders(); setup(); };
+$('vDefaults').onclick = () => { Object.assign(p, DEFAULTS, { v: SETTINGS_V }); save(); buildSliders(); setup(); };
 $('vCopy').onclick = async () => {
   const keep = ['n', 'vis', 'ok', 'sideN', 'side', 'headN', 'head', 'seen', 'all', 'taps'];
   const rep = { build: T, demo, size: [w, h], fps: +fps.toFixed(1), ms: res && +res.ms.toFixed(1), W: res && +res.W.toFixed(1),
