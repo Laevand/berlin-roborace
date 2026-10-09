@@ -263,29 +263,43 @@ try {
   check(await page2.evaluate(() => window.__ble.got.includes('S')), 'sends S when the app goes to background');
   await page2.close();
 
-  // 3. Camera vision (vision.html): the pipeline against the synthetic camera's ground truth, then the page itself
-  const { Vision, VDEFAULTS } = await import('../vision-core.js');
+  // 3. Camera vision (vision.html): the pipeline against the synthetic camera's ground truth (my robot plus two
+  // others on the lane), then the page itself. Without the beacon, a tap on my robot's box stands in for the user.
+  const { Vision, VDEFAULTS, contour } = await import('../vision-core.js');
   const { SynthCam, score } = await import('../vision-synth.js');
   for (const [cam, beacon] of [['follow', true], ['high', true], ['side', true], ['follow', false], ['side', false]]) {
     const vw = 240, vh = 180, sc = new SynthCam(vw, vh, { cam, beacon }), vis = new Vision(vw, vh), buf = new Uint8ClampedArray(vw * vh * 4);
-    let n = 0, ok = 0, iou = 0, side = 0, sideN = 0, head = 0, headN = 0;
-    for (let k = 0; k < 150; k++) {
-      const gt = sc.render(k * 0.1, buf), s = score(vis.process(buf, k * 100, VDEFAULTS), gt, vis.drive);
-      n++; iou += s.iou;
-      if (gt.robot) ok += s.ok ? 1 : 0;
+    let n = 0, vis0 = 0, ok = 0, iou = 0, side = 0, sideN = 0, head = 0, headN = 0, seen = 0, all = 0, taps = 0, boxes = 0;
+    for (let k = 0; k < 240; k++) {
+      const gt = sc.render(k / 30, buf);
+      let res = vis.process(buf, (k * 1000) / 30, VDEFAULTS);
+      if (res.mine == null && gt.robot && vis.select(...gt.robot) != null) { taps++; res = { ...res, robot: vis.tracks.find((q) => q.id === vis.mine).pos }; }
+      const s = score(res, gt, vis.drive);
+      n++; iou += s.iou; seen += s.seen; all += s.all; boxes += res.tracks.length;
+      if (gt.robot && vis.mine != null) { vis0++; ok += s.ok ? 1 : 0; }
       if (s.sideOk != null) { sideN++; side += s.sideOk; }
       if (s.headOk != null) { headN++; head += s.headOk; }
     }
-    const tag = `${cam} camera, ${beacon ? 'green beacon' : 'dark gap'}`;
-    check(ok >= n * 0.97 && iou / n > 0.9, `vision tracks the robot (${ok}/${n} within ½ lane width) and lane (IoU ${(iou / n).toFixed(3)}), ${tag}`);
+    const tag = `${cam} camera, ${beacon ? 'green beacon' : 'no beacon'}`;
+    check(vis0 > n * 0.9 && ok >= vis0 * 0.97 && taps <= 1 && iou / n > 0.9,
+      `vision keeps my robot locked (${ok}/${vis0}, ${taps} taps) and finds the lane (IoU ${(iou / n).toFixed(3)}), ${tag}`);
+    check(seen >= all * 0.85 && boxes <= all * 1.4, `vision boxes the robots in view (${seen}/${all}, ${boxes} boxes), ${tag}`);
     check(side >= sideN * 0.9 && head >= headN * 0.85, `vision offset side ${side}/${sideN} and heading ${head}/${headN} right, ${tag}`);
+    if (cam === 'follow' && beacon) check(taps === 0, 'vision picks the beacon robot as mine without a tap');
+  }
+  {
+    const m = new Uint8Array(20 * 20);
+    for (let y = 5; y < 15; y++) for (let x = 5; x < 15; x++) m[y * 20 + x] = 1;
+    const seg = contour(m, 20, 20);
+    const xs = seg.filter((_, i) => i % 2 === 0);
+    check(seg.length > 0 && Math.min(...xs) > 4 && Math.max(...xs) < 16, 'vision outline traces a square mask');
   }
   const page3 = await ctx.newPage();
   page3.on('pageerror', (e) => errors.push(e.message));
   await page3.goto(BASE + 'vision.html?demo');
   await page3.waitForFunction(() => window.rv?.stats.n > 30, null, { timeout: 15000 }).catch(() => {});
   const vs = await page3.evaluate(() => ({ ...window.rv.stats, found: window.rv.res?.found }));
-  check(vs.n > 30 && vs.ok >= vs.vis * 0.95 && vs.found, `vision page runs the demo and tracks the robot (${vs.ok}/${vs.vis} frames)`);
+  check(vs.n > 30 && vs.vis > 20 && vs.ok >= vs.vis * 0.95 && vs.found, `vision page runs the demo and tracks the robot (${vs.ok}/${vs.vis} frames)`);
   await page3.close();
 } finally {
   await browser.close();

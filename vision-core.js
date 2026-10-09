@@ -3,9 +3,11 @@
 // in the lane, all measured straight in the picture. That needs no map, so it works from whatever angle the phone sees.
 //   lane   = pink/purple/blue pixels, plus white pixels right next to them (the edge lines)
 //   drive  = lane with small gaps closed and enclosed holes filled (the robot sits in one of those holes)
-//   robot  = green headlights (the beacon: no green on the track, and it marks the front), else a blob of
-//            "drive but not lane" (a dark thing on the lane), or a color taught by tapping the robot
-//   pose   = heading from the beacon (else the lane direction, kept pointing the same way as last frame),
+//   robots = every dark blob on the lane ("drive but not lane"), each joined with green headlights next to it
+//            (the beacon: no green on the track, and it marks the front); or blobs of a color taught by tapping
+//   tracks = robots followed from frame to frame (nearest to where each was heading); select() picks "mine",
+//            which stays locked while the phone or the robots move. A beacon robot is picked as mine by itself.
+//   pose   = for mine: heading from the beacon (else the lane direction, kept pointing the same way as last frame),
 //            offset in the lane (-1 left edge … +1 right edge),
 //            free lane ahead in lane widths, and the free direction to steer to (longest ray in a ±60° fan)
 
@@ -67,16 +69,40 @@ export class Vision {
   }
 
   reset() {
-    this.pos = null;     // [x, y] of the tracked robot
-    this.front = null;   // [x, y] of the beacon
-    this.vel = [0, 0];   // px/s
-    this.heading = null; // unit vector from motion
-    this.lost = 99;      // frames since the robot was last seen
-    this.hist = [];
+    this.tracks = [];      // [{ id, pos, vel, box, age, missed, beacon, hd }]
+    this.nextId = 1;
+    this.mine = null;      // id of my robot's track
+    this.mineBeacon = false; // my robot has shown the beacon: re-find it by the beacon when lost
+    this.picked = false;   // the user picked a robot (then no automatic beacon pick to someone else)
+    this.heading = null;   // my robot's heading, unit vector in the picture
     this.t = null;
   }
 
-  seed(x, y) { this.pos = [x, y]; this.vel = [0, 0]; this.heading = null; this.hist = []; this.lost = 0; }
+  // make the track nearest to (x, y) mine; returns its id, or null if no robot is near
+  select(x, y) {
+    let best = null, bd = Infinity;
+    for (const tr of this.tracks) {
+      const [x0, y0, x1, y1] = tr.box, reach = Math.max(this.W, Math.hypot(x1 - x0, y1 - y0) / 2 + 0.3 * this.W);
+      const d = Math.hypot(tr.pos[0] - x, tr.pos[1] - y);
+      if (d < reach && d < bd) { bd = d; best = tr; }
+    }
+    if (!best) return null;
+    this.mine = best.id;
+    this.mineBeacon = best.beacon > 0;
+    this.picked = true;
+    this.heading = best.hd || null;
+    return best.id;
+  }
+
+  // a new track at (x, y), made mine (for the taught color, before it has been seen)
+  seed(x, y) {
+    const r = this.W / 4;
+    const tr = { id: this.nextId++, pos: [x, y], vel: [0, 0], box: [x - r, y - r, x + r, y + r], age: 1, missed: 0, beacon: 0, hd: null };
+    this.tracks.push(tr);
+    this.mine = tr.id;
+    this.picked = true;
+    this.heading = null;
+  }
 
   // learn the robot's color (chromaticity and brightness) from a 5×5 patch around (x, y)
   teach(data, x, y) {
@@ -89,7 +115,7 @@ export class Vision {
     }
     const s = r + g + b || 1;
     this.color = { r: r / s, g: g / s, sum: s / k };
-    this.seed(x, y);
+    if (this.select(x, y) == null) this.seed(x, y);
     return this.color;
   }
 
@@ -296,8 +322,9 @@ export class Vision {
     }
     const W = this.W;
 
-    // 6. robot candidates: holes in the lane (or the taught color), and beacon blobs
-    if (p.robotSrc === 'color' && this.color) {
+    // 6. robot detections: holes in the lane (or the taught color), each joined with a beacon next to it
+    const colorMode = p.robotSrc === 'color' && this.color;
+    if (colorMode) {
       const { r: cr, g: cg, sum } = this.color;
       this.box(drive, Math.max(1, Math.round(W / 3)), tmp, false);
       for (let i = 0, j = 0; i < n; i++, j += 4) {
@@ -308,73 +335,104 @@ export class Vision {
       for (let i = 0; i < n; i++) cand[i] = drive[i] & (lane[i] ^ 1);
     }
     const aMin = p.robotMin * W * W, aMax = p.robotMax * W * W;
-    const holes = this.components(cand).filter((c) => c.area >= aMin && c.area <= aMax);
+    // robots are compact blobs; thin slivers along the lane edge are left over from gap closing
+    const thick = Math.max(2, 0.2 * W);
+    const holes = this.components(cand).filter((c) => c.area >= (colorMode ? 4 : aMin) && c.area <= aMax &&
+      (colorMode || (Math.min(c.x1 - c.x0, c.y1 - c.y0) + 1 >= thick && c.area >= 0.3 * (c.x1 - c.x0 + 1) * (c.y1 - c.y0 + 1) &&
+        Math.max(c.x1 - c.x0, c.y1 - c.y0) + 1 <= 3 * (Math.min(c.x1 - c.x0, c.y1 - c.y0) + 1))));
     let beacons = [];
     if (useBeacon) {
       this.box(bea, Math.max(1, Math.round(W * 0.15)), tmp, false); // the two headlights merge into one blob
       beacons = this.components(tmp).filter((c) => c.area >= 6 && c.area <= aMax);
     }
-    const beaconMode = beacons.length > 0 || p.robotSrc === 'beacon';
-    const cands = beaconMode ? beacons : holes;
-
-    // 7. track: nearest candidate to the prediction, or the best-looking one when lost
-    const dt = this.t == null ? 0.05 : Math.min(0.5, Math.max(0.001, (tMs - this.t) / 1000));
-    this.t = tMs;
-    const tracking = this.pos && this.lost < 8;
-    // the beacon sits at the front of the car, so predict and gate on the beacon itself
-    const ref = tracking ? (beaconMode && this.front ? this.front : this.pos) : null;
-    const pred = ref ? [ref[0] + this.vel[0] * dt, ref[1] + this.vel[1] * dt] : null;
-    const gate = Math.max(1.5 * W, 2 * Math.hypot(...this.vel) * dt);
-    let best = null, bestScore = Infinity;
-    for (const c of cands) {
-      let score;
-      if (pred) {
-        score = Math.hypot(c.cx - pred[0], c.cy - pred[1]);
-        if (score > gate) continue;
-      } else if (beaconMode) {
-        score = -c.area;
-      } else {
-        if (c.border) continue;
-        score = Math.abs(Math.log(c.area / (0.25 * W * W))) + Math.hypot(c.cx - w / 2, c.cy - h / 2) / (w / 2);
-      }
-      if (score < bestScore) { bestScore = score; best = c; }
-    }
-    let np = null, beaconHeading = null;
-    this.front = null;
-    if (best && beaconMode) {
-      this.front = [best.cx, best.cy];
-      // body = the hole right behind the beacon; heading = body → beacon
+    const dets = [], used = new Set();
+    for (const b of beacons) {
       let body = null, bd = 1.2 * W;
       for (const c of holes) {
-        const d = Math.hypot(c.cx - best.cx, c.cy - best.cy);
-        if (d < bd) { bd = d; body = c; }
+        const d = Math.hypot(c.cx - b.cx, c.cy - b.cy);
+        if (!used.has(c) && d < bd) { bd = d; body = c; }
       }
-      if (body && bd > 0.08 * W) {
-        np = [body.cx, body.cy];
-        beaconHeading = [(best.cx - body.cx) / bd, (best.cy - body.cy) / bd];
-      } else np = [best.cx, best.cy];
-    } else if (best) np = [best.cx, best.cy];
-    if (np) {
-      if (this.pos && tracking) {
-        const iv = [(np[0] - this.pos[0]) / dt, (np[1] - this.pos[1]) / dt];
-        const k = Math.min(1, dt / 0.25);
-        this.vel = [this.vel[0] + (iv[0] - this.vel[0]) * k, this.vel[1] + (iv[1] - this.vel[1]) * k];
-      } else this.vel = [0, 0];
-      this.pos = np;
-      this.lost = 0;
-      this.hist.push([tMs, np[0], np[1]]);
-      while (this.hist.length > 2 && tMs - this.hist[1][0] > 600) this.hist.shift();
-    } else {
-      this.lost++;
-      if (this.pos && this.lost < 8) this.pos = pred;
-      this.hist = [];
+      if (body) used.add(body);
+      const o = body || b;
+      dets.push({ x: o.cx, y: o.cy, box: [Math.min(o.x0, b.x0), Math.min(o.y0, b.y0), Math.max(o.x1, b.x1), Math.max(o.y1, b.y1)], beacon: true, border: false,
+        hd: body && bd > 0.08 * W ? [(b.cx - body.cx) / bd, (b.cy - body.cy) / bd] : null });
+    }
+    if (p.robotSrc !== 'beacon') {
+      for (const c of holes) if (!used.has(c)) dets.push({ x: c.cx, y: c.cy, box: [c.x0, c.y0, c.x1, c.y1], beacon: !!colorMode, border: c.border, hd: null });
     }
 
-    // 8. pose in the lane
-    const out = { W, laneFrac: laneN / n, cands, beaconMode, found: !!np, lost: this.lost, robot: this.pos && this.lost < 8 ? [...this.pos] : null };
+    // 7. tracking: match each track to the nearest detection around where it was heading, closest pairs first
+    const dt = this.t == null ? 0.05 : Math.min(0.5, Math.max(0.001, (tMs - this.t) / 1000));
+    this.t = tMs;
+    const pairs = [];
+    for (const tr of this.tracks) {
+      tr.pred = [tr.pos[0] + tr.vel[0] * dt, tr.pos[1] + tr.vel[1] * dt];
+      const gate = Math.min(4 * W, Math.max(1.2 * W, 2 * Math.hypot(...tr.vel) * dt) * (1 + 0.3 * tr.missed));
+      dets.forEach((d, k) => {
+        const dist = Math.hypot(d.x - tr.pred[0], d.y - tr.pred[1]);
+        if (dist <= gate) pairs.push([dist - (d.beacon && tr.beacon > 0 ? 0.5 * W : 0), tr, k]);
+      });
+    }
+    pairs.sort((a, b) => a[0] - b[0]);
+    const tMatched = new Set(), dMatched = new Set();
+    const take = (tr, d) => {
+      const k = Math.min(1, dt / 0.25);
+      if (tr.age > 1 && !tr.missed) {
+        tr.vel = [tr.vel[0] + ((d.x - tr.pos[0]) / dt - tr.vel[0]) * k, tr.vel[1] + ((d.y - tr.pos[1]) / dt - tr.vel[1]) * k];
+      }
+      tr.pos = [d.x, d.y];
+      tr.box = d.box;
+      tr.hd = d.hd;
+      tr.beacon = d.beacon ? 30 : Math.max(0, tr.beacon - 1); // frames the beacon counts as seen
+      tr.missed = 0;
+      tr.age++;
+      tMatched.add(tr);
+    };
+    for (const [, tr, k] of pairs) {
+      if (tMatched.has(tr) || dMatched.has(k)) continue;
+      dMatched.add(k);
+      take(tr, dets[k]);
+    }
+    let mineTr = this.tracks.find((tr) => tr.id === this.mine) || null;
+    // my robot shows the beacon: if its track lost it, the beacon robot is still mine
+    const beaconDet = dets.findIndex((d, k) => d.beacon && !dMatched.has(k));
+    if (beaconDet >= 0 && (mineTr ? !tMatched.has(mineTr) && this.mineBeacon : this.mineBeacon || !this.picked)) {
+      if (!mineTr) {
+        mineTr = { id: this.nextId++, pos: [0, 0], vel: [0, 0], box: null, age: 1, missed: 0, beacon: 0, hd: null };
+        this.tracks.push(mineTr);
+        this.mine = mineTr.id;
+      }
+      dMatched.add(beaconDet);
+      take(mineTr, dets[beaconDet]);
+      mineTr.vel = [0, 0]; // jumped: no speed from that
+      this.mineBeacon = true;
+    }
+    for (const tr of this.tracks) {
+      if (tMatched.has(tr)) continue;
+      tr.missed++;
+      tr.pos = tr.pred;
+      tr.vel = [tr.vel[0] * 0.7, tr.vel[1] * 0.7];
+      tr.beacon = Math.max(0, tr.beacon - 1);
+    }
+    // forget tracks not seen for a while (mine is kept longer, it may come back into view)
+    this.tracks = this.tracks.filter((tr) => (tr.id === this.mine ? tr.missed <= 45 : tr.missed <= 8 && (tr.age > 2 || !tr.missed)));
+    dets.forEach((d, k) => {
+      if (dMatched.has(k) || d.border) return; // a blob cut by the picture's edge only continues a track
+      this.tracks.push({ id: this.nextId++, pos: [d.x, d.y], vel: [0, 0], box: d.box, age: 1, missed: 0, beacon: d.beacon ? 30 : 0, hd: d.hd });
+    });
+    mineTr = this.tracks.find((tr) => tr.id === this.mine) || null;
+    if (!mineTr && this.mine != null) { this.mine = null; this.heading = null; }
+    if (mineTr && mineTr.beacon > 0) this.mineBeacon = true;
+
+    // 8. pose of my robot in the lane
+    const out = {
+      W, laneFrac: laneN / n, dets, mine: this.mine,
+      tracks: this.tracks.filter((tr) => tr.age >= 3 || tr.id === this.mine).map((tr) => ({ id: tr.id, x: tr.pos[0], y: tr.pos[1], box: tr.box, missed: tr.missed, beacon: tr.beacon > 0, mine: tr.id === this.mine })),
+      robot: mineTr ? [...mineTr.pos] : null, found: !!mineTr && !mineTr.missed, lost: mineTr ? mineTr.missed : null,
+    };
     if (out.robot) {
       const [x, y] = out.robot;
-      // lane direction from the centerline near the robot (principal axis), sign from the motion heading
+      // lane direction from the centerline near the robot (principal axis)
       let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, k = 0;
       const R = Math.ceil(W), x0 = Math.max(0, Math.round(x) - R), x1 = Math.min(w - 1, Math.round(x) + R);
       for (let yy = Math.max(0, Math.round(y) - R); yy <= Math.min(h - 1, Math.round(y) + R); yy++) {
@@ -390,19 +448,15 @@ export class Vision {
         axis = [Math.cos(a), Math.sin(a)];
       }
       // heading: the beacon if seen; else the lane direction, pointing the same way as last frame (or as the
-      // motion in the picture when there is no last frame; that is only right while the phone is held still)
-      let motion = null;
-      if (this.hist.length > 1) {
-        const [ht, hx, hy] = this.hist[0], mv = Math.hypot(x - hx, y - hy);
-        if (this.t - ht > 150 && mv > 0.25 * W) motion = [(x - hx) / mv, (y - hy) / mv];
-      }
-      const prev = this.heading || motion || [0, -1];
+      // track's motion in the picture when there is no last frame; that is only right while the phone is held still)
+      const sp = Math.hypot(...mineTr.vel);
+      const prev = this.heading || (sp > W ? [mineTr.vel[0] / sp, mineTr.vel[1] / sp] : [0, -1]);
+      const beaconHeading = mineTr.missed ? null : mineTr.hd;
       if (beaconHeading) this.heading = beaconHeading;
       else if (axis) this.heading = axis[0] * prev[0] + axis[1] * prev[1] < 0 ? [-axis[0], -axis[1]] : axis;
       out.axis = axis;
       out.heading = this.heading;
       out.headingFrom = beaconHeading ? 'beacon' : axis ? 'lane' : this.heading ? 'last' : null;
-      out.beacon = this.front;
       const dir = this.heading;
       const xi = Math.round(x), yi = Math.round(y);
       out.onLane = xi >= 0 && yi >= 0 && xi < w && yi < h && !!drive[yi * w + xi];
@@ -430,4 +484,42 @@ export class Vision {
     out.ms = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
     return out;
   }
+}
+
+// Outline of a mask as line segments [x1, y1, x2, y2, …] in pixel units (marching squares on a 3×3 smoothed
+// copy, so the line is smooth instead of stair-stepped). Nothing is drawn along the picture's border.
+export function contour(m, w, h) {
+  const f = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1); yy++) {
+        for (let xx = Math.max(0, x - 1); xx <= Math.min(w - 1, x + 1); xx++) s += m[yy * w + xx];
+      }
+      f[y * w + x] = s;
+    }
+  }
+  const T = 4.5, seg = [];
+  const cut = (x1, y1, v1, x2, y2, v2) => { const t = (T - v1) / (v2 - v1); return [x1 + (x2 - x1) * t + 0.5, y1 + (y2 - y1) * t + 0.5]; };
+  for (let y = 0; y < h - 1; y++) {
+    for (let x = 0; x < w - 1; x++) {
+      const a = f[y * w + x], b = f[y * w + x + 1], c = f[(y + 1) * w + x + 1], d = f[(y + 1) * w + x];
+      const code = (a > T ? 1 : 0) | (b > T ? 2 : 0) | (c > T ? 4 : 0) | (d > T ? 8 : 0);
+      if (code === 0 || code === 15) continue;
+      const top = () => cut(x, y, a, x + 1, y, b), right = () => cut(x + 1, y, b, x + 1, y + 1, c);
+      const bottom = () => cut(x, y + 1, d, x + 1, y + 1, c), left = () => cut(x, y, a, x, y + 1, d);
+      const add = (p, q) => seg.push(p[0], p[1], q[0], q[1]);
+      switch (code) {
+        case 1: case 14: add(left(), top()); break;
+        case 2: case 13: add(top(), right()); break;
+        case 3: case 12: add(left(), right()); break;
+        case 4: case 11: add(right(), bottom()); break;
+        case 6: case 9: add(top(), bottom()); break;
+        case 7: case 8: add(left(), bottom()); break;
+        case 5: add(left(), top()); add(right(), bottom()); break;
+        case 10: add(top(), right()); add(left(), bottom()); break;
+      }
+    }
+  }
+  return seg;
 }

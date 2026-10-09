@@ -1,8 +1,9 @@
 // Camera debug page (vision.html): runs vision-core.js on the phone's camera, or on the synthetic camera with
-// ground truth (vision.html?demo), and draws everything it finds. Not connected to driving yet: the goal is to
+// ground truth (vision.html?demo), and draws what it finds over the video: the lane outline, a square on every
+// robot, and my robot (tap its square; it stays locked while the phone or the robots move). Not connected to driving yet: the goal is to
 // see that it finds the lane and the robot reliably from any angle before it gets near the control loop.
 const T = new URL(import.meta.url).search;
-const { Vision, VDEFAULTS, classify } = await import('./vision-core.js' + T);
+const { Vision, VDEFAULTS, classify, contour } = await import('./vision-core.js' + T);
 
 const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const UART_RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // phone -> robot (write)
@@ -24,9 +25,10 @@ const SLIDERS = [
   ['bVal', 'Beacon min brightness', 0, 1, 0.01],
   ['colorTol', 'Taught color tolerance', 0.01, 0.2, 0.005],
 ];
-const DEFAULTS = { ...VDEFAULTS, procW: 240, view: 'overlay', tap: 'inspect', cam: 'follow' };
+const DEFAULTS = { ...VDEFAULTS, procW: 240, view: 'outline', cam: 'follow', center: 0 };
 const load = () => { try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('rr.vision') || '{}') }; } catch { return { ...DEFAULTS }; } };
 const p = load();
+if (!['outline', 'mask', 'raw'].includes(p.view)) p.view = 'outline';
 const save = () => { try { localStorage.setItem('rr.vision', JSON.stringify(p)); } catch { /* private mode */ } };
 const demo = new URLSearchParams(location.search).has('demo');
 
@@ -51,8 +53,7 @@ document.body.innerHTML = `
   <a class="btn" href="./" style="text-decoration:none">◀ App</a>
   <button id="vStart" class="btn primary">${demo ? 'Demo' : 'Camera'}</button>
   <button id="vFreeze" class="btn">Freeze</button>
-  <div class="seg" id="vView"><button data-v="overlay">Overlay</button><button data-v="mask">Mask</button><button data-v="raw">Raw</button></div>
-  <div class="seg" id="vTap"><button data-v="inspect">Tap: inspect</button><button data-v="robot">Tap: robot</button></div>
+  <div class="seg" id="vView"><button data-v="outline">Outline</button><button data-v="mask">Mask</button><button data-v="raw">Raw</button></div>
   <button id="vBle" class="btn hidden">Beacon lights</button>
   <span id="vStatus" class="muted small" style="margin-left:auto"></span>
 </header>
@@ -61,14 +62,17 @@ document.body.innerHTML = `
   <div id="vpanel">
     <div id="vRead"></div>
     <div id="vScore"></div>
-    <h4>Tap inspector</h4><div id="vInspect" class="muted small">Tap the picture to read a pixel's hue, saturation and brightness.</div>
+    <h4>Tap</h4><div id="vInspect" class="muted small">Tap a box to make that robot yours. Tap anywhere else to read that pixel's hue, saturation and brightness.</div>
     <div class="row"><button id="vCopy" class="btn">Copy report</button><button id="vReset" class="btn">Reset tracker</button><button id="vDefaults" class="btn">Defaults</button></div>
-    <label>Robot detection <select id="vSrc"><option value="auto">auto: beacon, else dark gap</option><option value="beacon">green beacon only</option><option value="hole">dark gap in lane</option><option value="color">taught color (Tap: robot)</option></select></label>
+    <label class="inline"><input type="checkbox" id="vCenter"> show centerline</label>
+    <label>Robot detection <select id="vSrc"><option value="auto">dark blobs on the lane + green beacon</option><option value="beacon">green beacon only</option><option value="hole">dark blobs only</option><option value="color">taught color (tap the robot)</option></select></label>
     ${demo ? '<label>Demo camera <select id="vCam"><option value="follow">follow (chest height)</option><option value="high">held high</option><option value="side">side of the mat</option></select></label><label class="inline"><input type="checkbox" id="vNoBeacon"> demo car without beacon</label>' : ''}
     <div id="vSliders"></div>
-    <p class="muted small">Overlay: magenta = lane, yellow = filled gaps (the robot sits in one), cyan = centerline, green ring = robot,
-      arrow = heading, red/blue = distance to the left/right edge, white fan = free lane ahead, thick ray = suggested steering.
-      Beacon: tap "Beacon lights" (Bluefy) to turn the headlights green; the camera finds the car and its front from the green.</p>
+    <p class="muted small">Outline: yellow-green line = the lane edges it found (should sit on the track's edges), squares = robots,
+      green square = yours (stays locked while you or it move; dashed = briefly hidden, kept for ~1.5 s), arrow = its heading,
+      red/blue = distance to the left/right edge, white rays = free lane ahead, thick ray = suggested steering.
+      Mask: magenta = lane pixels, yellow = gaps filled in (robots sit in them), cyan = centerline, green = beacon pixels.
+      Beacon: tap "Beacon lights" (Bluefy) to turn the headlights green; the camera then picks your car by itself and sees its front.</p>
   </div>
 </div>`;
 
@@ -78,7 +82,7 @@ const proc = document.createElement('canvas'), pg = proc.getContext('2d', { will
 const mk = document.createElement('canvas'), mg = mk.getContext('2d');
 let vis = null, synth = null, scoreFn = null, img = null, maskImg = null, res = null, gt = null, frozen = false, running = false;
 let w = 0, h = 0, fps = 0, lastFrame = 0, simT = 0;
-const stats = { n: 0, vis: 0, ok: 0, iou: 0, side: 0, sideN: 0, head: 0, headN: 0 };
+const stats = { n: 0, vis: 0, ok: 0, iou: 0, side: 0, sideN: 0, head: 0, headN: 0, seen: 0, all: 0, taps: 0 };
 const samples = [];
 let inspect = null;
 
@@ -90,13 +94,13 @@ function buildSliders() {
     $('vs-' + k).oninput = (e) => { p[k] = Number(e.target.value); $('vv-' + k).textContent = p[k]; save(); if (k === 'procW') setup(); };
   }
   $('vSrc').value = p.robotSrc;
+  $('vCenter').checked = !!p.center;
   if ($('vCam')) $('vCam').value = p.cam;
   segOn('vView', p.view);
-  segOn('vTap', p.tap);
 }
 function segOn(id, v) { for (const b of $(id).children) b.classList.toggle('on', b.dataset.v === v); }
 $('vView').onclick = (e) => { if (e.target.dataset.v) { p.view = e.target.dataset.v; segOn('vView', p.view); save(); draw(); } };
-$('vTap').onclick = (e) => { if (e.target.dataset.v) { p.tap = e.target.dataset.v; segOn('vTap', p.tap); save(); } };
+$('vCenter').onchange = (e) => { p.center = e.target.checked ? 1 : 0; save(); draw(); };
 $('vSrc').onchange = (e) => { p.robotSrc = e.target.value; save(); vis?.reset(); };
 if ($('vCam')) $('vCam').onchange = (e) => { p.cam = e.target.value; save(); setup(); };
 if ($('vNoBeacon')) $('vNoBeacon').onchange = () => setup();
@@ -104,9 +108,9 @@ $('vFreeze').onclick = () => { frozen = !frozen; $('vFreeze').classList.toggle('
 $('vReset').onclick = () => { vis?.reset(); Object.keys(stats).forEach((k) => (stats[k] = 0)); };
 $('vDefaults').onclick = () => { Object.assign(p, DEFAULTS); save(); buildSliders(); setup(); };
 $('vCopy').onclick = async () => {
-  const keep = ['n', 'vis', 'ok', 'sideN', 'side', 'headN', 'head'];
+  const keep = ['n', 'vis', 'ok', 'sideN', 'side', 'headN', 'head', 'seen', 'all', 'taps'];
   const rep = { build: T, demo, size: [w, h], fps: +fps.toFixed(1), ms: res && +res.ms.toFixed(1), W: res && +res.W.toFixed(1),
-    lane: res && +res.laneFrac.toFixed(3), robot: res?.robot?.map(Math.round), heading: res?.headingFrom, offset: res?.offset?.toFixed(2),
+    lane: res && +res.laneFrac.toFixed(3), robots: res?.tracks.length, mine: res?.robot?.map(Math.round), lost: res?.lost, heading: res?.headingFrom, offset: res?.offset?.toFixed(2),
     stats: demo ? Object.fromEntries(keep.map((k) => [k, stats[k]])) : undefined, samples, p: Object.fromEntries(Object.entries(p).filter(([k]) => k in DEFAULTS)) };
   try { await navigator.clipboard.writeText(JSON.stringify(rep)); $('vCopy').textContent = 'Copied'; } catch { prompt('Copy this:', JSON.stringify(rep)); }
   setTimeout(() => ($('vCopy').textContent = 'Copy report'), 1500);
@@ -178,6 +182,11 @@ function loop(ts) {
     img = pg.getImageData(0, 0, w, h);
   }
   res = vis.process(img.data, ts, p);
+  // demo: stand in for the user's tap on their robot whenever none is picked (counted as a tap)
+  if (demo && res.mine == null && gt.robot && vis.select(gt.robot[0], gt.robot[1]) != null) {
+    stats.taps++;
+    res = vis.process(img.data, ts + 0.001, p);
+  }
   if (demo) score();
   draw();
   readouts();
@@ -187,7 +196,9 @@ function score() {
   const s = scoreFn(res, gt, vis.drive);
   stats.n++;
   stats.iou += s.iou;
-  if (gt.robot) { stats.vis++; stats.ok += s.ok ? 1 : 0; }
+  if (gt.robot && (stats.taps || res.mine != null)) { stats.vis++; stats.ok += s.ok ? 1 : 0; }
+  stats.seen += s.seen;
+  stats.all += s.all;
   if (s.sideOk != null) { stats.sideN++; stats.side += s.sideOk ? 1 : 0; }
   if (s.headOk != null) { stats.headN++; stats.head += s.headOk ? 1 : 0; }
   stats.last = s;
@@ -196,57 +207,83 @@ function score() {
 // ---- drawing ----
 function draw() {
   if (!res || !w) return;
-  const k = can.width / w;
+  const k = can.width / w, px = (window.devicePixelRatio || 1) / k; // one CSS pixel in picture units
   g.setTransform(1, 0, 0, 1, 0, 0);
   g.imageSmoothingEnabled = !demo;
   if (p.view === 'mask') { g.fillStyle = '#000'; g.fillRect(0, 0, can.width, can.height); }
   else if (demo) g.drawImage(proc, 0, 0, can.width, can.height);
   else g.drawImage(video, 0, 0, can.width, can.height);
-  if (p.view !== 'raw') {
-    const d = maskImg.data, alpha = p.view === 'mask' ? 255 : 110;
+  if (p.view === 'mask') {
+    const d = maskImg.data;
     for (let i = 0, j = 0; i < w * h; i++, j += 4) {
       let c = null;
-      if (vis.skel[i]) c = [0, 240, 255, 255];
-      else if (vis.bea[i]) c = [40, 255, 90, 255];
-      else if (vis.lane[i]) c = [230, 60, 230, alpha];
-      else if (vis.drive[i]) c = [255, 220, 0, 200];
-      if (c) { d[j] = c[0]; d[j + 1] = c[1]; d[j + 2] = c[2]; d[j + 3] = c[3]; } else d[j + 3] = 0;
+      if (vis.skel[i]) c = [0, 240, 255];
+      else if (vis.bea[i]) c = [40, 255, 90];
+      else if (vis.lane[i]) c = [230, 60, 230];
+      else if (vis.drive[i]) c = [255, 220, 0];
+      if (c) { d[j] = c[0]; d[j + 1] = c[1]; d[j + 2] = c[2]; d[j + 3] = 255; } else d[j + 3] = 0;
     }
     mg.putImageData(maskImg, 0, 0);
     g.imageSmoothingEnabled = false;
     g.drawImage(mk, 0, 0, can.width, can.height);
   }
   g.setTransform(k, 0, 0, k, 0, 0);
-  g.lineWidth = 1.5 / k * (window.devicePixelRatio || 1);
-  for (const c of res.cands) { g.strokeStyle = 'rgba(255,170,0,.8)'; g.strokeRect(c.x0, c.y0, c.x1 - c.x0 + 1, c.y1 - c.y0 + 1); }
-  if (gt?.robot) { g.strokeStyle = '#fff'; g.setLineDash([2, 2]); circle(gt.robot[0], gt.robot[1], res.W * 0.5); g.setLineDash([]); }
-  if (res.robot) {
-    const [x, y] = res.robot;
-    g.strokeStyle = res.found ? '#2bd47d' : '#ffb020';
-    g.lineWidth *= 2;
-    circle(x, y, res.W * 0.35);
-    g.lineWidth /= 2;
-    if (res.fan) {
+  if (p.view === 'outline') {
+    const seg = contour(vis.drive, w, h);
+    g.beginPath();
+    for (let i = 0; i < seg.length; i += 4) { g.moveTo(seg[i], seg[i + 1]); g.lineTo(seg[i + 2], seg[i + 3]); }
+    g.lineCap = 'round';
+    g.strokeStyle = 'rgba(0,0,0,.55)';
+    g.lineWidth = 5 * px;
+    g.stroke();
+    g.strokeStyle = '#d6ff3a';
+    g.lineWidth = 2.5 * px;
+    g.stroke();
+    if (p.center) {
+      g.fillStyle = 'rgba(0,240,255,.8)';
+      for (let i = 0; i < w * h; i++) if (vis.skel[i]) g.fillRect((i % w) + 0.5 - px, Math.floor(i / w) + 0.5 - px, 2 * px, 2 * px);
+    }
+  }
+  if (p.view !== 'raw') {
+    // my robot: pose rays first, so the boxes sit on top
+    if (res.robot && res.fan) {
+      const [x, y] = res.robot;
       for (const [a, r, fx, fy] of res.fan) {
-        g.strokeStyle = a === res.steer ? '#fff' : 'rgba(255,255,255,.35)';
-        g.lineWidth = (a === res.steer ? 3 : 1) / k * (window.devicePixelRatio || 1);
+        g.strokeStyle = a === res.steer ? '#fff' : 'rgba(255,255,255,.3)';
+        g.lineWidth = (a === res.steer ? 3 : 1) * px;
         line(x, y, x + fx * r, y + fy * r);
       }
       const [dx, dy] = res.heading;
-      g.lineWidth = 3 / k * (window.devicePixelRatio || 1);
+      g.lineWidth = 3 * px;
       g.strokeStyle = '#ff3b5c'; line(x, y, x + dy * res.dl, y - dx * res.dl);
       g.strokeStyle = '#3d7bff'; line(x, y, x - dy * res.dr, y + dx * res.dr);
     }
-    if (res.heading) {
-      const [dx, dy] = res.heading, L = res.W * 0.9;
+    if (gt?.robot) { g.strokeStyle = 'rgba(255,255,255,.8)'; g.lineWidth = 1 * px; g.setLineDash([3 * px, 3 * px]); circle(gt.robot[0], gt.robot[1], res.W * 0.15); g.setLineDash([]); }
+    g.font = `${12 * px}px -apple-system, system-ui, sans-serif`;
+    g.textBaseline = 'bottom';
+    for (const tr of res.tracks) {
+      const [x0, y0, x1, y1] = tr.box, half = Math.max(x1 - x0 + 1, y1 - y0 + 1, res.W * 0.5) / 2 + 2 * px;
+      g.strokeStyle = tr.mine ? '#2bd47d' : '#ffb020';
+      g.lineWidth = (tr.mine ? 3 : 1.5) * px;
+      if (tr.missed) g.setLineDash([4 * px, 3 * px]);
+      g.strokeRect(tr.x - half, tr.y - half, 2 * half, 2 * half);
+      g.setLineDash([]);
+      const label = tr.mine ? `MINE${tr.beacon ? ' ●' : ''}` : `#${tr.id}`;
+      g.fillStyle = 'rgba(0,0,0,.6)';
+      g.fillRect(tr.x - half, tr.y - half - 14 * px, g.measureText(label).width + 6 * px, 14 * px);
+      g.fillStyle = tr.mine ? '#2bd47d' : '#ffb020';
+      g.fillText(label, tr.x - half + 3 * px, tr.y - half - 1 * px);
+    }
+    if (res.robot && res.heading) {
+      const [x, y] = res.robot, [dx, dy] = res.heading, L = res.W * 0.9;
       g.strokeStyle = '#2bd47d';
-      g.lineWidth = 3 / k * (window.devicePixelRatio || 1);
+      g.lineWidth = 3 * px;
       line(x, y, x + dx * L, y + dy * L);
       line(x + dx * L, y + dy * L, x + dx * L * 0.7 - dy * L * 0.2, y + dy * L * 0.7 + dx * L * 0.2);
       line(x + dx * L, y + dy * L, x + dx * L * 0.7 + dy * L * 0.2, y + dy * L * 0.7 - dx * L * 0.2);
     }
   }
-  if (inspect) { g.strokeStyle = '#fff'; g.lineWidth = 1 / k * (window.devicePixelRatio || 1); circle(inspect[0] + 0.5, inspect[1] + 0.5, 3); }
+  if (inspect) { g.strokeStyle = '#fff'; g.lineWidth = 1 * px; circle(inspect[0] + 0.5, inspect[1] + 0.5, 3); }
 }
 function circle(x, y, r) { g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.stroke(); }
 function line(a, b, c, d) { g.beginPath(); g.moveTo(a, b); g.lineTo(c, d); g.stroke(); }
@@ -258,7 +295,8 @@ function readouts() {
   $('vRead').innerHTML =
     kv('Lane in view', `${f(r.laneFrac * 100, 0)} %`, r.laneFrac > 0.02 ? 'good' : 'bad') +
     kv('Lane width', `${f(r.W, 1)} px`) +
-    kv('Robot', r.robot ? `${r.found ? 'found' : `predicted (${r.lost})`} via ${r.beaconMode ? 'beacon' : p.robotSrc === 'color' ? 'color' : 'gap'}` : 'not found', r.found ? 'good' : 'bad') +
+    kv('Robots in view', r.tracks.length) +
+    kv('My robot', r.robot ? `#${r.mine} ${r.found ? 'locked' : `hidden ${r.lost} frames`}` : 'none: tap its box', r.found ? 'good' : 'bad') +
     kv('Heading from', r.headingFrom || '–') +
     kv('Offset in lane', r.offset == null ? '–' : `${f(r.offset)} ${r.offset < -0.15 ? '◀ left' : r.offset > 0.15 ? 'right ▶' : 'center'}${r.offsetSure ? '' : ' (edge out of view)'}`) +
     kv('Free lane ahead', r.ahead == null ? '–' : `${f(r.ahead, 1)} widths`) +
@@ -267,8 +305,10 @@ function readouts() {
     const pc = (a, b) => (b ? `${((100 * a) / b).toFixed(1)} %` : '–');
     const s = stats.last || {};
     $('vScore').innerHTML = '<h4>Against ground truth (demo)</h4>' +
-      kv('Robot within ½ lane width', pc(stats.ok, stats.vis), stats.ok === stats.vis ? 'good' : 'bad') +
+      kv('Mine box on my robot', pc(stats.ok, stats.vis), stats.ok === stats.vis ? 'good' : 'bad') +
       kv('Error now', s.err == null ? '–' : `${f(s.err)} W`, s.ok ? 'good' : 'bad') +
+      kv('Robots in view with a box', pc(stats.seen, stats.all)) +
+      kv('Taps needed (demo taps for you)', stats.taps, stats.taps <= 1 ? 'good' : 'bad') +
       kv('Lane overlap (IoU)', `${f(stats.iou / stats.n, 3)} · now ${f(s.iou, 3)}`) +
       kv('Offset side right', pc(stats.side, stats.sideN)) +
       kv('Heading right', pc(stats.head, stats.headN)) +
@@ -276,27 +316,34 @@ function readouts() {
   }
 }
 
-// ---- taps ----
+// ---- taps: a robot box makes it mine; anywhere else inspects the pixel (or teaches the color) ----
 can.addEventListener('pointerdown', (e) => {
   if (!vis || !img) return;
   const rc = can.getBoundingClientRect();
-  const x = Math.max(0, Math.min(w - 1, Math.floor(((e.clientX - rc.left) / rc.width) * w)));
-  const y = Math.max(0, Math.min(h - 1, Math.floor(((e.clientY - rc.top) / rc.height) * h)));
-  if (p.tap === 'robot') {
-    if (p.robotSrc === 'color') vis.teach(img.data, x, y);
-    else vis.seed(x, y);
-    $('vInspect').textContent = `Robot set at ${x},${y}${p.robotSrc === 'color' ? ' (color learned)' : ''}`;
-  } else {
-    const j = (y * w + x) * 4, [rr, gg, bb] = [img.data[j], img.data[j + 1], img.data[j + 2]];
-    const c = classify(rr, gg, bb, p);
-    inspect = [x, y];
-    const lane = vis.lane[y * w + x] ? 'lane' : vis.drive[y * w + x] ? 'gap (filled)' : 'off lane';
-    samples.push([Math.round(c.h), +c.s.toFixed(2), +c.v.toFixed(2), c.cls]);
-    if (samples.length > 12) samples.shift();
-    $('vInspect').innerHTML = `<b>${x},${y}</b> rgb ${rr},${gg},${bb} · <b>hue ${Math.round(c.h)}° sat ${f(c.s)} val ${f(c.v)}</b> → ${c.cls}, mask: ${lane}` +
-      `<br><span class="muted">recent: ${samples.map((s) => `${s[0]}°/${s[1]}/${s[2]} ${s[3]}`).join(' · ')}</span>`;
+  const fx = ((e.clientX - rc.left) / rc.width) * w, fy = ((e.clientY - rc.top) / rc.height) * h;
+  const x = Math.max(0, Math.min(w - 1, Math.floor(fx))), y = Math.max(0, Math.min(h - 1, Math.floor(fy)));
+  const id = vis.select(fx, fy);
+  if (id != null) {
+    inspect = null;
+    $('vInspect').textContent = `Robot #${id} is yours. Its box stays green while you or it move.`;
+    if (frozen && res) res = { ...res, mine: id, tracks: res.tracks.map((tr) => ({ ...tr, mine: tr.id === id })) };
     draw();
+    return;
   }
+  if (p.robotSrc === 'color') {
+    vis.teach(img.data, x, y);
+    $('vInspect').textContent = `Robot color learned at ${x},${y}`;
+    return;
+  }
+  const j = (y * w + x) * 4, [rr, gg, bb] = [img.data[j], img.data[j + 1], img.data[j + 2]];
+  const c = classify(rr, gg, bb, p);
+  inspect = [x, y];
+  const lane = vis.lane[y * w + x] ? 'lane' : vis.drive[y * w + x] ? 'gap (filled)' : 'off lane';
+  samples.push([Math.round(c.h), +c.s.toFixed(2), +c.v.toFixed(2), c.cls]);
+  if (samples.length > 12) samples.shift();
+  $('vInspect').innerHTML = `<b>${x},${y}</b> rgb ${rr},${gg},${bb} · <b>hue ${Math.round(c.h)}° sat ${f(c.s)} val ${f(c.v)}</b> → ${c.cls}, mask: ${lane}` +
+    `<br><span class="muted">recent: ${samples.map((s) => `${s[0]}°/${s[1]}/${s[2]} ${s[3]}`).join(' · ')}</span>`;
+  draw();
 });
 
 // ---- beacon lights over Bluetooth (Bluefy only; the main app's connection is separate) ----
